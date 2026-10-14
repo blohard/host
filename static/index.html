@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>blohard CDN</title>
+<style>
+  :root { --bg:#0f1115; --card:#181b22; --ink:#e8eaf0; --dim:#8b93a7; --acc:#6ea8fe; --err:#ff7b72; --ok:#56d364; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font:15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  header { padding:1.2rem 1.5rem; border-bottom:1px solid #262b36; display:flex; align-items:baseline; gap:.8rem; }
+  h1 { font-size:1.1rem; margin:0; }
+  header span { color:var(--dim); font-size:.85rem; }
+  main { display:grid; grid-template-columns:1fr 1fr; gap:1.2rem; padding:1.2rem 1.5rem; max-width:1200px; margin:0 auto; }
+  @media (max-width: 800px) { main { grid-template-columns:1fr; } }
+  .card { background:var(--card); border:1px solid #262b36; border-radius:10px; padding:1.1rem 1.2rem; }
+  .card h2 { margin:0 0 .8rem; font-size:.95rem; color:var(--acc); text-transform:uppercase; letter-spacing:.06em; }
+  label { display:block; color:var(--dim); font-size:.8rem; margin:.6rem 0 .25rem; }
+  input, textarea { width:100%; background:#0d0f13; color:var(--ink); border:1px solid #2c3240;
+         border-radius:6px; padding:.5rem .6rem; font:inherit; }
+  textarea { min-height:180px; font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:.85rem; resize:vertical; }
+  input { font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:.85rem; }
+  button { margin-top:.8rem; background:var(--acc); color:#0b1020; border:0; border-radius:6px;
+         padding:.5rem 1.1rem; font:inherit; font-weight:600; cursor:pointer; }
+  button:hover { filter:brightness(1.1); }
+  .hint { margin-top:.5rem; color:var(--dim); font-family:ui-monospace, Menlo, monospace; font-size:.75rem; word-break:break-all; }
+  .result { margin-top:.8rem; font-family:ui-monospace, Menlo, monospace; font-size:.8rem;
+         word-break:break-all; white-space:pre-wrap; }
+  .result.ok { color:var(--ok); } .result.err { color:var(--err); }
+  .rendered { margin-top:.8rem; border-top:1px solid #262b36; padding-top:.8rem; }
+  footer { color:var(--dim); font-size:.75rem; padding:0 1.5rem 1.5rem; max-width:1200px; margin:0 auto;
+         font-family:ui-monospace, Menlo, monospace; word-break:break-all; }
+</style>
+</head>
+<body>
+<header><h1>blohard CDN</h1><span>content-addressed message store</span></header>
+<main>
+  <section class="card">
+    <h2>Publish</h2>
+    <label for="cid">chain id (EIP-155) the post landed on</label>
+    <input id="cid" type="number" min="1" placeholder="e.g. 810337">
+    <label for="mid">on-chain message id (proof of anchoring)</label>
+    <input id="mid" type="number" min="1" placeholder="e.g. 42">
+    <label for="text">plain text content (stored as a <code>version/1 text/plain</code> record)</label>
+    <textarea id="text" placeholder="hello blohard"></textarea>
+    <div id="localhash" class="hint">local keccak-256: (empty)</div>
+    <button id="pub">Publish</button>
+    <div id="pubout" class="result"></div>
+  </section>
+  <section class="card">
+    <h2>Read</h2>
+    <label for="hash">content hash (keccak-256)</label>
+    <input id="hash" placeholder="0x…">
+    <button id="fetch">Fetch &amp; verify</button>
+    <div id="readout" class="result"></div>
+    <div id="rendered" class="rendered" hidden></div>
+  </section>
+</main>
+<footer id="status">loading status…</footer>
+<script>
+// ---------------------------------------------------------------------------
+// Keccak-256 as used by the EVM: original Keccak pad10*1 with the 0x01 domain
+// byte (NOT SHA3-256, which pads with 0x06). Inlined rather than loaded from
+// a CDN so the page's trust boundary is exactly one origin: a hash library
+// fetched from a third party could lie about whether content matches.
+// Input: Uint8Array. Output: lowercase hex without 0x.
+// ---------------------------------------------------------------------------
+const keccak256 = (() => {
+  const RC = [ // round constants as [lo, hi] 32-bit halves
+    [0x00000001,0x00000000],[0x00008082,0x00000000],[0x0000808a,0x80000000],[0x80008000,0x80000000],
+    [0x0000808b,0x00000000],[0x80000001,0x00000000],[0x80008081,0x80000000],[0x00008009,0x80000000],
+    [0x0000008a,0x00000000],[0x00000088,0x00000000],[0x80008009,0x00000000],[0x8000000a,0x00000000],
+    [0x8000808b,0x00000000],[0x0000008b,0x80000000],[0x00008089,0x80000000],[0x00008003,0x80000000],
+    [0x00008002,0x80000000],[0x00000080,0x80000000],[0x0000800a,0x00000000],[0x8000000a,0x80000000],
+    [0x80008081,0x80000000],[0x00008080,0x80000000],[0x80000001,0x00000000],[0x80008008,0x80000000],
+  ];
+  // rho rotation offsets, lane index i = x + 5y
+  const ROT = [0,1,62,28,27,36,44,6,55,20,3,10,43,25,39,41,45,15,21,8,18,2,61,56,14];
+  // pi destination: (x,y) -> (y, 2x+3y)
+  const PI = [];
+  for (let i = 0; i < 25; i++) { const x = i % 5, y = (i / 5) | 0; PI[i] = y + 5 * ((2 * x + 3 * y) % 5); }
+
+  function permute(s) { // s: Uint32Array(50); lane i = (s[2i] lo, s[2i+1] hi)
+    const C = new Uint32Array(10), B = new Uint32Array(50);
+    for (let r = 0; r < 24; r++) {
+      for (let x = 0; x < 5; x++) { // theta: column parities
+        C[2*x]   = s[2*x]   ^ s[2*(x+5)]   ^ s[2*(x+10)]   ^ s[2*(x+15)]   ^ s[2*(x+20)];
+        C[2*x+1] = s[2*x+1] ^ s[2*(x+5)+1] ^ s[2*(x+10)+1] ^ s[2*(x+15)+1] ^ s[2*(x+20)+1];
+      }
+      for (let x = 0; x < 5; x++) {
+        const l = 2*((x+4)%5), h = 2*((x+1)%5);
+        const dlo = C[l]   ^ ((C[h] << 1)   | (C[h+1] >>> 31));
+        const dhi = C[l+1] ^ ((C[h+1] << 1) | (C[h] >>> 31));
+        for (let y = 0; y < 25; y += 5) { s[2*(x+y)] ^= dlo; s[2*(x+y)+1] ^= dhi; }
+      }
+      for (let i = 0; i < 25; i++) { // rho + pi
+        const n = ROT[i], lo = s[2*i], hi = s[2*i+1], j = 2*PI[i];
+        if (n === 0)       { B[j] = lo; B[j+1] = hi; }
+        else if (n < 32)   { B[j] = (lo << n) | (hi >>> (32-n)); B[j+1] = (hi << n) | (lo >>> (32-n)); }
+        else if (n === 32) { B[j] = hi; B[j+1] = lo; }
+        else { const m = n-32; B[j] = (hi << m) | (lo >>> (32-m)); B[j+1] = (lo << m) | (hi >>> (32-m)); }
+      }
+      for (let y = 0; y < 25; y += 5) for (let x = 0; x < 5; x++) { // chi
+        const i = 2*(x+y), a = 2*(((x+1)%5)+y), b = 2*(((x+2)%5)+y);
+        s[i]   = B[i]   ^ (~B[a]   & B[b]);
+        s[i+1] = B[i+1] ^ (~B[a+1] & B[b+1]);
+      }
+      s[0] ^= RC[r][0]; s[1] ^= RC[r][1]; // iota
+    }
+  }
+
+  return function keccak256(bytes) {
+    const RATE = 136; // 1088-bit rate for 256-bit output
+    const s = new Uint32Array(50);
+    const padded = new Uint8Array(Math.ceil((bytes.length + 1) / RATE) * RATE);
+    padded.set(bytes);
+    padded[bytes.length] ^= 0x01;
+    padded[padded.length - 1] ^= 0x80;
+    for (let off = 0; off < padded.length; off += RATE) {
+      for (let i = 0; i < RATE / 4; i++) {
+        const p = off + 4*i;
+        s[i] ^= padded[p] | (padded[p+1] << 8) | (padded[p+2] << 16) | (padded[p+3] << 24);
+      }
+      permute(s);
+    }
+    let hex = '';
+    for (let i = 0; i < 8; i++) { // first 32 bytes, little-endian words
+      const w = s[i];
+      hex += [w & 0xff, (w >>> 8) & 0xff, (w >>> 16) & 0xff, (w >>> 24) & 0xff]
+        .map(b => b.toString(16).padStart(2, '0')).join('');
+    }
+    return hex;
+  };
+})();
+
+// Self-check against the EVM vector for keccak256("") — if this fails the
+// page refuses to claim anything is verified.
+const KECCAK_OK = keccak256(new Uint8Array(0)) === 'c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470';
+
+const $ = (id) => document.getElementById(id);
+const normHash = (h) => h.trim().toLowerCase().replace(/^0x/, '');
+const hashOf = (bytes) => '0x' + keccak256(bytes);
+const utf8 = (s) => new TextEncoder().encode(s);
+// The content envelope (protocol SPEC.md §6): one header line, then the body.
+const HEADER = 'version/1 text/plain\n';
+const wrap = (text) => utf8(HEADER + text);
+
+async function refreshStatus() {
+  try {
+    const s = await (await fetch('/api/status')).json();
+    const chains = (s.chains || [])
+      .map(c => `${c.id}${c.name ? ` (${c.name})` : ''} @ ${c.contract}`).join(', ');
+    $('status').textContent =
+      `verifier: ${s.verifier}` + (chains ? ` · chains: ${chains}` : '') +
+      ` · store root: ${s.root}` + (KECCAK_OK ? '' : ' · LOCAL KECCAK SELF-CHECK FAILED');
+    // One configured chain: save the user the typing.
+    if ((s.chains || []).length === 1 && !$('cid').value) $('cid').value = s.chains[0].id;
+  } catch { $('status').textContent = 'status unavailable'; }
+}
+
+// Show the hash the author must anchor on-chain, live, before anything is sent.
+function updateLocalHash() {
+  const text = $('text').value;
+  $('localhash').textContent = text.length
+    ? `local keccak-256: ${hashOf(wrap(text))}`
+    : 'local keccak-256: (empty)';
+}
+$('text').addEventListener('input', updateLocalHash);
+
+$('pub').onclick = async () => {
+  const out = $('pubout');
+  out.className = 'result';
+  out.textContent = 'publishing…';
+  const bytes = wrap($('text').value);
+  const local = hashOf(bytes);
+  const qs = new URLSearchParams();
+  const cid = $('cid').value.trim(), mid = $('mid').value.trim();
+  if (cid) qs.set('chain_id', cid);
+  if (mid) qs.set('message_id', mid);
+  try {
+    const q = qs.toString();
+    const resp = await fetch(`/api/publish${q ? `?${q}` : ''}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain' },
+      body: bytes,
+    });
+    const j = await resp.json();
+    if (!resp.ok) { out.className = 'result err'; out.textContent = j.error; return; }
+    if (normHash(j.hash) !== normHash(local)) {
+      // The server disagrees with our own hash of the same bytes: either it is
+      // broken or it is lying. Neither is something to publish through.
+      out.className = 'result err';
+      out.textContent = `server reported ${j.hash} but these bytes hash to ${local} — do not trust this host`;
+      return;
+    }
+    out.className = 'result ok';
+    out.textContent = (j.stored ? 'stored ' : 'already present ') + j.hash;
+    $('hash').value = j.hash;
+    refreshStatus();
+  } catch (e) { out.className = 'result err'; out.textContent = String(e); }
+};
+
+$('fetch').onclick = async () => {
+  const out = $('readout');
+  const pane = $('rendered');
+  out.className = 'result';
+  out.textContent = 'fetching…';
+  pane.hidden = true;
+  pane.textContent = '';
+  try {
+    const requested = normHash($('hash').value);
+    if (!/^[0-9a-f]{64}$/.test(requested)) {
+      out.className = 'result err'; out.textContent = 'malformed hash: expected 32 bytes of hex'; return;
+    }
+    const resp = await fetch(`/api/content/0x${requested}`);
+    if (!resp.ok) {
+      const j = await resp.json().catch(() => ({ error: resp.statusText }));
+      out.className = 'result err'; out.textContent = j.error; return;
+    }
+    // Hash the exact bytes the host returned — never a decoded/re-encoded
+    // string — and compare to what we asked for. The host is untrusted.
+    const bytes = new Uint8Array(await resp.arrayBuffer());
+    const actual = keccak256(bytes);
+    if (!KECCAK_OK) {
+      out.className = 'result err'; out.textContent = 'local keccak self-check failed; cannot verify content'; return;
+    }
+    if (actual !== requested) {
+      out.className = 'result err';
+      out.textContent = `HASH MISMATCH — host returned ${bytes.length} bytes hashing to 0x${actual}, not the requested content. Not rendering.`;
+      return;
+    }
+    // Show only version-one message text, after verifying its bytes.
+    const text = new TextDecoder('utf-8').decode(bytes);
+    const nl = text.indexOf('\n');
+    const header = nl < 0 ? '' : text.slice(0, nl);
+    if (header !== HEADER.trim()) {
+      out.className = 'result err';
+      out.textContent = `${bytes.length} bytes, verified, but not a version/1 text/plain record (header: ${JSON.stringify(header.slice(0, 40))}) — not rendering`;
+      return;
+    }
+    out.className = 'result ok';
+    out.textContent = `${bytes.length} bytes · keccak-256 verified locally ✓ · text/plain`;
+    // This diagnostic inspector shows raw text; the app owns rich rendering.
+    pane.textContent = text.slice(nl + 1);
+    pane.style.whiteSpace = 'pre-wrap';
+    pane.style.overflowWrap = 'anywhere';
+    pane.hidden = false;
+  } catch (e) { out.className = 'result err'; out.textContent = String(e); }
+};
+
+updateLocalHash();
+refreshStatus();
+</script>
+</body>
+</html>

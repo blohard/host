@@ -1,0 +1,715 @@
+[
+ {
+  "type": "constructor",
+  "inputs": [
+   {
+    "name": "devFund",
+    "type": "address",
+    "internalType": "address"
+   }
+  ],
+  "stateMutability": "nonpayable"
+ },
+ {
+  "type": "function",
+  "name": "BASE_PRICE",
+  "inputs": [],
+  "outputs": [
+   {
+    "name": "",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "CREATOR_FEE_BPS",
+  "inputs": [],
+  "outputs": [
+   {
+    "name": "",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "DEV_FEE_BPS",
+  "inputs": [],
+  "outputs": [
+   {
+    "name": "",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "DEV_FUND",
+  "inputs": [],
+  "outputs": [
+   {
+    "name": "",
+    "type": "address",
+    "internalType": "address"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "MAX_SUPPLY",
+  "inputs": [],
+  "outputs": [
+   {
+    "name": "",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "RESERVE_SCALE",
+  "inputs": [],
+  "outputs": [
+   {
+    "name": "",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "activate",
+  "inputs": [
+   {
+    "name": "initialAmount",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "maxTotalCost",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "deadline",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "outputs": [],
+  "stateMutability": "payable"
+ },
+ {
+  "type": "function",
+  "name": "active",
+  "inputs": [
+   {
+    "name": "creator",
+    "type": "address",
+    "internalType": "address"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "",
+    "type": "bool",
+    "internalType": "bool"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "balanceOf",
+  "inputs": [
+   {
+    "name": "creator",
+    "type": "address",
+    "internalType": "address"
+   },
+   {
+    "name": "holder",
+    "type": "address",
+    "internalType": "address"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "buy",
+  "inputs": [
+   {
+    "name": "creator",
+    "type": "address",
+    "internalType": "address"
+   },
+   {
+    "name": "amount",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "maxTotalCost",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "deadline",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "outputs": [],
+  "stateMutability": "payable"
+ },
+ {
+  "type": "function",
+  "name": "claimFees",
+  "inputs": [
+   {
+    "name": "recipient",
+    "type": "address",
+    "internalType": "address"
+   }
+  ],
+  "outputs": [],
+  "stateMutability": "nonpayable"
+ },
+ {
+  "type": "function",
+  "name": "claimableFees",
+  "inputs": [
+   {
+    "name": "recipient",
+    "type": "address",
+    "internalType": "address"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "price",
+  "inputs": [
+   {
+    "name": "n",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "stateMutability": "pure"
+ },
+ {
+  "type": "function",
+  "name": "quoteAtSupply",
+  "inputs": [
+   {
+    "name": "startSupply",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "amount",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "q",
+    "type": "tuple",
+    "internalType": "struct AccountKeys.Quote",
+    "components": [
+     {
+      "name": "curveValue",
+      "type": "uint256",
+      "internalType": "uint256"
+     },
+     {
+      "name": "creatorFee",
+      "type": "uint256",
+      "internalType": "uint256"
+     },
+     {
+      "name": "devFee",
+      "type": "uint256",
+      "internalType": "uint256"
+     },
+     {
+      "name": "total",
+      "type": "uint256",
+      "internalType": "uint256"
+     }
+    ]
+   }
+  ],
+  "stateMutability": "pure"
+ },
+ {
+  "type": "function",
+  "name": "quoteBuy",
+  "inputs": [
+   {
+    "name": "creator",
+    "type": "address",
+    "internalType": "address"
+   },
+   {
+    "name": "amount",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "",
+    "type": "tuple",
+    "internalType": "struct AccountKeys.Quote",
+    "components": [
+     {
+      "name": "curveValue",
+      "type": "uint256",
+      "internalType": "uint256"
+     },
+     {
+      "name": "creatorFee",
+      "type": "uint256",
+      "internalType": "uint256"
+     },
+     {
+      "name": "devFee",
+      "type": "uint256",
+      "internalType": "uint256"
+     },
+     {
+      "name": "total",
+      "type": "uint256",
+      "internalType": "uint256"
+     }
+    ]
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "quoteSell",
+  "inputs": [
+   {
+    "name": "creator",
+    "type": "address",
+    "internalType": "address"
+   },
+   {
+    "name": "amount",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "q",
+    "type": "tuple",
+    "internalType": "struct AccountKeys.Quote",
+    "components": [
+     {
+      "name": "curveValue",
+      "type": "uint256",
+      "internalType": "uint256"
+     },
+     {
+      "name": "creatorFee",
+      "type": "uint256",
+      "internalType": "uint256"
+     },
+     {
+      "name": "devFee",
+      "type": "uint256",
+      "internalType": "uint256"
+     },
+     {
+      "name": "total",
+      "type": "uint256",
+      "internalType": "uint256"
+     }
+    ]
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "quoteTransfer",
+  "inputs": [
+   {
+    "name": "creator",
+    "type": "address",
+    "internalType": "address"
+   },
+   {
+    "name": "amount",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "q",
+    "type": "tuple",
+    "internalType": "struct AccountKeys.Quote",
+    "components": [
+     {
+      "name": "curveValue",
+      "type": "uint256",
+      "internalType": "uint256"
+     },
+     {
+      "name": "creatorFee",
+      "type": "uint256",
+      "internalType": "uint256"
+     },
+     {
+      "name": "devFee",
+      "type": "uint256",
+      "internalType": "uint256"
+     },
+     {
+      "name": "total",
+      "type": "uint256",
+      "internalType": "uint256"
+     }
+    ]
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "reserveAt",
+  "inputs": [
+   {
+    "name": "s",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "stateMutability": "pure"
+ },
+ {
+  "type": "function",
+  "name": "sell",
+  "inputs": [
+   {
+    "name": "creator",
+    "type": "address",
+    "internalType": "address"
+   },
+   {
+    "name": "amount",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "minNetProceeds",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "deadline",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "outputs": [],
+  "stateMutability": "nonpayable"
+ },
+ {
+  "type": "function",
+  "name": "supply",
+  "inputs": [
+   {
+    "name": "creator",
+    "type": "address",
+    "internalType": "address"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "transfer",
+  "inputs": [
+   {
+    "name": "creator",
+    "type": "address",
+    "internalType": "address"
+   },
+   {
+    "name": "to",
+    "type": "address",
+    "internalType": "address"
+   },
+   {
+    "name": "amount",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "maxFee",
+    "type": "uint256",
+    "internalType": "uint256"
+   },
+   {
+    "name": "deadline",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "outputs": [],
+  "stateMutability": "payable"
+ },
+ {
+  "type": "event",
+  "name": "Activated",
+  "inputs": [
+   {
+    "name": "creator",
+    "type": "address",
+    "indexed": true,
+    "internalType": "address"
+   }
+  ],
+  "anonymous": false
+ },
+ {
+  "type": "event",
+  "name": "FeesClaimed",
+  "inputs": [
+   {
+    "name": "recipient",
+    "type": "address",
+    "indexed": true,
+    "internalType": "address"
+   },
+   {
+    "name": "amount",
+    "type": "uint256",
+    "indexed": false,
+    "internalType": "uint256"
+   }
+  ],
+  "anonymous": false
+ },
+ {
+  "type": "event",
+  "name": "KeysTransferred",
+  "inputs": [
+   {
+    "name": "creator",
+    "type": "address",
+    "indexed": true,
+    "internalType": "address"
+   },
+   {
+    "name": "from",
+    "type": "address",
+    "indexed": true,
+    "internalType": "address"
+   },
+   {
+    "name": "to",
+    "type": "address",
+    "indexed": true,
+    "internalType": "address"
+   },
+   {
+    "name": "amount",
+    "type": "uint256",
+    "indexed": false,
+    "internalType": "uint256"
+   },
+   {
+    "name": "referenceValue",
+    "type": "uint256",
+    "indexed": false,
+    "internalType": "uint256"
+   },
+   {
+    "name": "creatorFee",
+    "type": "uint256",
+    "indexed": false,
+    "internalType": "uint256"
+   },
+   {
+    "name": "devFee",
+    "type": "uint256",
+    "indexed": false,
+    "internalType": "uint256"
+   }
+  ],
+  "anonymous": false
+ },
+ {
+  "type": "event",
+  "name": "Trade",
+  "inputs": [
+   {
+    "name": "creator",
+    "type": "address",
+    "indexed": true,
+    "internalType": "address"
+   },
+   {
+    "name": "trader",
+    "type": "address",
+    "indexed": true,
+    "internalType": "address"
+   },
+   {
+    "name": "isBuy",
+    "type": "bool",
+    "indexed": false,
+    "internalType": "bool"
+   },
+   {
+    "name": "amount",
+    "type": "uint256",
+    "indexed": false,
+    "internalType": "uint256"
+   },
+   {
+    "name": "curveValue",
+    "type": "uint256",
+    "indexed": false,
+    "internalType": "uint256"
+   },
+   {
+    "name": "creatorFee",
+    "type": "uint256",
+    "indexed": false,
+    "internalType": "uint256"
+   },
+   {
+    "name": "devFee",
+    "type": "uint256",
+    "indexed": false,
+    "internalType": "uint256"
+   },
+   {
+    "name": "newSupply",
+    "type": "uint256",
+    "indexed": false,
+    "internalType": "uint256"
+   }
+  ],
+  "anonymous": false
+ },
+ {
+  "type": "error",
+  "name": "AlreadyActive",
+  "inputs": []
+ },
+ {
+  "type": "error",
+  "name": "Expired",
+  "inputs": []
+ },
+ {
+  "type": "error",
+  "name": "InactiveMarket",
+  "inputs": []
+ },
+ {
+  "type": "error",
+  "name": "InsufficientKeys",
+  "inputs": []
+ },
+ {
+  "type": "error",
+  "name": "InsufficientPayment",
+  "inputs": []
+ },
+ {
+  "type": "error",
+  "name": "InvalidAmount",
+  "inputs": []
+ },
+ {
+  "type": "error",
+  "name": "InvalidRecipient",
+  "inputs": []
+ },
+ {
+  "type": "error",
+  "name": "PaymentFailed",
+  "inputs": []
+ },
+ {
+  "type": "error",
+  "name": "ReentrancyGuardReentrantCall",
+  "inputs": []
+ },
+ {
+  "type": "error",
+  "name": "Slippage",
+  "inputs": []
+ },
+ {
+  "type": "error",
+  "name": "SupplyLimit",
+  "inputs": []
+ },
+ {
+  "type": "error",
+  "name": "ZeroAddress",
+  "inputs": []
+ }
+]

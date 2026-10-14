@@ -53,9 +53,10 @@ relayer sends sponsored transactions; its routes are outside this host API.
   that are not JSON. A failed read never tells you whether a transaction happened. The relayer has
   its own rules for reporting outcomes.
 - API answers default to `Cache-Control: no-store`. Successful content downloads may be kept by any
-  cache for a year as immutable. App pages, the widget, its loader and the demo are sent `no-cache`;
-  hashed assets are immutable for a year, and a missing asset is a plain 404 with `no-store`. A 304
-  answer keeps the same policy.
+  cache for five minutes and must then be revalidated, since the host may take content down; the
+  hash is their ETag. App pages, the widget, its loader and the demo are sent `no-cache`; hashed
+  assets are immutable for a year, and a missing asset is a plain 404 with `no-store`. A 304 answer
+  keeps the same policy.
 - The status document and content downloads allow cross-origin reads from any origin (`*`). The
   application routes also allow GET, POST and OPTIONS from any origin, with `Content-Type` allowed
   in preflight requests. Publishing does not advertise cross-origin permission. Reads require no
@@ -88,11 +89,21 @@ reserve, and every new token goes to the follower. The reserve is a floor on the
 **not** a fixed allocation of 300 calls a minute. When metering is on, it must be smaller than
 `calls_per_minute`.
 
+Name lookups, for display names and transfer recipients, stop earlier: halfway between the reserve
+and a full bucket, in whole tokens (1,650 with a budget of 3,000 and a reserve of 300). Like other
+client calls they are answered busy at once. So a flood of lookups leaves the headroom below that
+line to other client work, such as checking uploads, receipts and replies, and to ingestion. It is
+headroom names cannot spend, not an allocation of its own: whatever client work or ingestion asks
+first spends it. A lookup that needs several calls can be refused partway when the balance sits at
+the line, and is answered 503 `name_unavailable` like any lookup refused by the budget. Lookups
+never pause an upstream for this.
+
 The 32 upstream concurrency slots are split into 28 for client work and four for ingestion, each
-with a two-second wait for a slot, so slow client calls cannot take the follower's slots. Checking
-the chains at startup uses ingestion's slots and token reserve; checking the chain for a client's
-receipt request uses the client allowance. Running out of either answers 503 `host_busy` on the
-receipt route, including while its index is starting or stopped.
+with a two-second wait for a slot, so slow client calls cannot take the follower's slots. Name
+lookups use client slots, but at most 24 lookups run at once, each making one call at a time, so
+they always leave four. Checking the chains at startup uses ingestion's slots and token reserve;
+checking the chain for a client's receipt request uses the client allowance. Running out of either
+answers 503 `host_busy` on the receipt route, including while its index is starting or stopped.
 
 `calls_per_minute = 0` turns this rate budget off, but not the concurrency limits or the bounds on
 answers. Answers from a cache or the index spend no tokens. One request can need several RPC calls,
@@ -105,8 +116,7 @@ handle 503 and back off, rather than treat the configured rate as their own allo
 Each visitor has a budget for work that reads the chain live: reply admission checks, gas estimates
 and transaction lookups share one. Uploads to `/api/publish` and name lookups that miss the cache
 each have their own budget, slots and short queue. Message bodies have upload slots of their own
-within the upload budget, so a visitor's slow attachments cannot hold up their posts. Indexed reads
-and cached names cost nothing from these budgets.
+within the upload budget, so a visitor's slow attachments cannot hold up their posts. Indexed reads and cached names cost nothing from these budgets, nor does a content request for a record this host has. A content request naming a message for a record this host lacks spends from the reader's live-read budget first, since checking that message asks the chain before any peer is tried; past the budget it answers 429 without asking.
 
 A refused request gets HTTP 429 `visitor_read_limit` with `Retry-After: 2`. The reference client
 retries an upload refused this way with the same bytes and proof after that wait, at most three
@@ -138,10 +148,12 @@ moderation settings apps use (`curated`, `blocklist`, `blocking`, `closed_gate`,
 `key_gates`). They are described in [GATEWAY_API.md](GATEWAY_API.md#status-index-and-app-fields).
 
 The top-level `upstream` field, null in development mode, counts this host's calls to its RPC
-upstreams since it started, by class: `{client: {calls, busy}, ingestion: {calls, busy}}`. `calls`
-were sent; `busy` were refused by the shared budget or the concurrency limit before any call was
-made. A rising `client.busy` with a flat `ingestion.busy` is the budget doing its job under client
-load; a rising `ingestion.busy` means the follower itself is being held back.
+upstreams since it started, by class:
+`{client: {calls, busy}, names: {calls, busy}, ingestion: {calls, busy}}`, where `names` counts name
+lookups apart from other client work. `calls` were sent; `busy` were refused by the shared budget or
+the concurrency limit before any call was made. A rising `client.busy` with a flat `ingestion.busy`
+is the budget doing its job under client load; a rising `ingestion.busy` means the follower itself
+is being held back.
 
 `store` reports `max_content_size`, the largest body this host stores, header included (configured
 per host, 4,000 bytes on the reference deployment and never above 1 MiB); `envelope`
@@ -232,7 +244,11 @@ A body enters permanent storage only once its message reaches the configured acc
 is, enough confirmations. Until then the upload is held in memory, unserved, for at most 30 minutes.
 The holding area takes at most 64 MiB and 4,096 records in all, and 16 records and 12 MiB per signer
 on each chain, so one or two signers cannot fill it with uploads whose transactions never get mined.
-A held upload is dropped if its transaction reverts, if it does not match, or when it expires.
+One open issue: a pending `postBySig` is charged to the author its signature names, and that
+signature is public calldata once the post is mined, so a stranger's transactions that carry an
+author's old signed posts, if a provider reports them as pending, count against that author until
+they expire. Whether a Base provider ever reports such a transaction as pending is unverified. A
+held upload is dropped if its transaction reverts, if it does not match, or when it expires.
 
 On a store-only host, each held body costs one Board read per new accepted head. A body found not
 yet accepted is not read again until the accepted head moves, and a failed read backs that body off
@@ -271,15 +287,19 @@ stored or held. Upload the body first, then its attachments, with the same query
 connection drops or times out partway through the write, the write is not lost and the store is not
 disturbed: the host finishes it in a task of its own, and only the answer goes unheard.
 
-Uploads are admitted before their bytes are read, into one of two pools chosen by the declared
-`Content-Length`. An upload declaring at most `max_content_size`, normally a message body, takes one
-of sixteen small slots, and its bytes must then arrive within ten seconds. Any other upload,
-including one that declares no length, takes one of 32 large slots and has the whole request timeout
-to arrive. So attachments on slow connections cannot hold up message bodies. An upload that finds
-its pool full answers 503 `the host is busy; try again shortly` at once, without waiting for its
-bytes. An incomplete or refused request gives back its slot; once verification starts, the operation
-keeps the slot until it finishes, even if the HTTP client disconnects or times out. This bounds the
-uploads buffered in memory, separately from the holding area's limits.
+Uploads are read before they take a slot. The declared `Content-Length` picks one of two pools. An
+upload declaring at most `max_content_size`, normally a message body, is small, and its bytes must
+arrive within ten seconds. Any other upload, including one that declares no length, is large and has
+the whole request timeout to arrive. While its bytes arrive, an upload holds only its visitor's own
+upload lanes and the memory its buffer takes, charged to its pool as the buffer grows: 32 MiB in all
+for small uploads and 64 MiB for large ones. Once every byte is in, it takes one of its pool's
+slots, sixteen small or 32 large, for its checks and write. So a slow sender holds no shared slot,
+and attachments cannot hold up message bodies. An upload answers 503
+`the host is busy; try again shortly` at once when its pool's memory has no room for its next bytes,
+or when no slot is free once its bytes are in. An incomplete or refused request gives back its
+memory; once verification starts, the operation keeps its slot and its memory until it finishes,
+even if the HTTP client disconnects or times out. This bounds the uploads buffered in memory,
+separately from the holding area's limits.
 
 **Response `200`.** The message is accepted and the record is in the store. It is served from now
 on, and safely on disk after the store's next commit, a few seconds later; a crash before that
@@ -333,8 +353,9 @@ come after the proof:
 | `400` | `empty_content` | `empty content` | zero-length body |
 | `400` | `invalid_envelope` | `invalid content envelope: …` | the first line is not a valid `version/1 <media-type>` header (see [spec §6][spec-6]); the message says which rule failed |
 | `413` | `too_large` | `content exceeds <n> bytes` | over the largest size this host accepts for anything (the attachment cap, or 1 MiB on a bodies-only host, the ceiling any body cap stays under). A declared length more than about 1 KiB over it is refused before the body is read. |
-| `413` | `too_large` | `a message body exceeds <max_content_size> bytes` / `an attachment exceeds <max_bytes> bytes` | the record was identified as a body or an attachment and is over that kind's cap |
-| `415` | `attachment_type_not_stored` | `this host stores attachments of these types only: …` | host policy (`media_types` in `[store.attachments]`): the attachment's declared media type is not one the host stores |
+| `413` | `body_too_large` | `a message body exceeds <max_content_size> bytes` | the record is the named post's body and is over the body cap. The same bytes may be a fine attachment of another post, so a peer fetch refused this way backs off only fetches of these bytes as a body |
+| `413` | `attachment_too_large` | `an attachment exceeds <max_bytes> bytes` | the record is the named post's attachment and is over the attachment cap. An attachment cap can be under the body cap, so a peer fetch refused this way backs off only fetches of these bytes as an attachment |
+| `415` | `attachment_type_not_stored` | `this host stores attachments of these types only: …` | host policy (`media_types` in `[store.attachments]`): the attachment's declared media type is not one the host stores. The same bytes may be another post's body, so a peer fetch refused this way backs off only fetches of these bytes as an attachment |
 | `400` | `proof_required` | `chain_id and either message_id or tx_hash are required: upload only after the post is sent` | a proof parameter is missing (enforced mode only) |
 | `400` | `chain_not_served` | `chain <C> is not served by this host` | `chain_id` is not in the host's configuration; see `/api/status` for the list |
 | `400` | `malformed_request` | `tx_hash must be 32 bytes of hex` | malformed `tx_hash` |
@@ -343,14 +364,16 @@ come after the proof:
 | `403` | `signature_invalid` | `transaction 0x… names an author whose signature does not verify` | a pending `postBySig` whose signature the named author did not make (checked as the Board will check it: the signature recovers to the author, or the author has code and accepts it through ERC-1271). Refused before it can take a holding slot in that author's name. |
 | `403` | `not_anchored` | `not anchored on-chain: chain <C> has no message <M> (eth_call failed: …)` | the core contract reverted: no such message id at the block asked, which a lagging RPC also answers for a post mined moments ago; see the retry guidance below. A provider error that is not a revert, such as a rate limit, is answered 502 instead. |
 | `403` | `host_blocked` | `posting blocked by host` | the host's policy blocks the post's author ([host blocks](GATEWAY_API.md#host-blocks)). Held uploads by a blocked author are dropped too. |
+| `410` | `taken_down` | `this host has taken this content down` | the host's admin has taken these bytes down, so it accepts them under no post. Checked before anything is asked of the chain. |
+| `410` | `message_gone` | `this post has been deleted or removed, so this host takes none of its content` | the post's author deleted it or its parent's author removed it ([spec §5.6][spec]), or a pending post is created already deleted. This covers its body and its attachments. A held upload whose post is deleted before it is accepted is dropped, and nothing is copied from peers for such a post. Another live post with the same bytes still stores them. |
 | `403` | `not_message_body` | `this upload is not the message's body (the message commits to 0x…), and this host stores no attachments` | the upload does not hash to the message's content hash, and this host does not take attachments |
 | `409` | `body_not_held` | `the body of chain <C> message <M> is not on this host yet: upload it before its attachments` (or `… pending message …` with a `tx_hash` proof) | the upload looks like an attachment, but the host has no body (stored or held) to check it against; also what wrong body bytes get on a host that stores attachments |
 | `403` | `attachment_not_referenced` | `chain <C> message <M> does not reference 0x… within its first <K> record references` | the message's body does not list this record among the references this host honours (only `text/plain` bodies can carry references) |
 | `429` | `signer_holding_limit` | `this signer already has <n> unconfirmed records held; wait for them to be confirmed` / `… <n> unconfirmed bytes held; …` | the holding area's per-signer bounds on records and bytes; retry once the earlier posts are accepted |
 | `507` | `holding_full` | `the host is holding its maximum of <n> unconfirmed bytes; retry once the message is accepted` / `… maximum of <n> unconfirmed records; …` | the holding area is full, in bytes or in records; retry with the `message_id` once the message is accepted and the record goes straight to the store |
 | `502` | `chain_read_unavailable` | `could not verify anchoring; try again shortly` | the chain's RPC endpoint was unreachable or returned something unintelligible. **The host could not check**; nothing is implied about the post. Retry later. RPC details are logged server-side, not included in the response. |
-| `503` | `host_busy` | `the host is busy; try again shortly` | upload admission, upstream concurrency or the configured RPC budget is exhausted. Upload-pool refusal occurs before reading the body. Retry the same bytes/proof after backoff. |
-| `408` | `upload_too_slow` | `the upload arrived too slowly; send it again` | an upload small enough for the small pool did not arrive within ten seconds of admission; its slot is released. Send the same bytes again. |
+| `503` | `host_busy` | `the host is busy; try again shortly` | upload memory or slots, upstream concurrency or the configured RPC budget is exhausted. An upload is refused as soon as its pool's memory has no room for its next bytes, or once its bytes are in if no slot is free. Retry the same bytes/proof after backoff. |
+| `408` | `upload_too_slow` | `the upload arrived too slowly; send it again` | an upload small enough for the small pool did not arrive within ten seconds; its memory is released. Send the same bytes again. |
 | `400` | `upload_incomplete` | `the upload did not arrive in full; send it again` | the connection failed while the body was arriving |
 | `503` | `body_not_held` | `the body is no longer held; retry the upload` | the provisional body left holding while attachment admission was in flight. Retry the same bytes/proof after backoff; no attachment slot was taken. |
 | `503` | `index_unavailable` | `the chain index is unavailable; try again shortly` | the required index is starting, backfilling or stopped; no holding slot is taken. Retain the bytes and retry once the index is ready. |
@@ -381,10 +404,12 @@ forth. Clients that know the message, as every client reading a feed does, shoul
 Peer fetches in progress for the same hash and size limit share one task, including background
 copies. At most eight distinct fetches run at once; a new one beyond that answers 503 instead of
 waiting, though a duplicate can still join a fetch already running. Each peer gets five seconds, and
-the whole fetch thirty. The position in the peer list is remembered per hash and size limit for an
-hour, up to 10,000 entries, so a lookup that timed out resumes with the peers not yet tried. This
-schedule lives only in memory. A reader disconnecting does not cancel the shared work; its slot is
-released when the fetch completes or times out.
+the whole fetch thirty; a peer's redirect is not followed. The position in the peer list is
+remembered per hash and size limit for an hour, up to 10,000 entries, so a lookup that timed out
+resumes with the peers not yet tried. A refusal of the bytes as one post's body or attachment, by
+this host's body cap, attachment cap or attachment types, backs off asks for them in that role only;
+a peer that lacks them backs off both. This schedule lives only in memory. A reader disconnecting
+does not cancel the shared work; its slot is released when the fetch completes or times out.
 
 A failed fetch backs off from thirty seconds to thirty minutes, doubling from the end of each
 attempt. This schedule shares the bounded map of positions and applies to readers and background
@@ -409,16 +434,21 @@ that no peer has holds up no other. All chains' sweeps share two of the eight pe
 leaving the rest for readers; a copy waiting on a stalled peer can still hold up a pass for up to
 thirty seconds. A record this host refuses for what it is, such as its type or size, or a body that
 does not reference it, is dropped and not downloaded again for thirty minutes; a passing refusal,
-such as a full holding area, is retried after thirty seconds. Missing records are kept in memory
-only, at most 100,000 per chain, and the walk after a restart finds whatever is still missing. Junk
-references in enough posts could fill that limit, after which new attachments wait for a restart.
-Hosts that index, store and list each other as peers therefore back each other up.
+such as a full holding area, is retried after thirty seconds. A post that was deleted or removed, or
+whose author this host blocks, vouches for nothing, and nothing is fetched for it. When the post a
+missing record was noted for can no longer vouch, the record is let go and the walk runs again, so
+any other post still needing it notes it anew. Records this host has taken down are never fetched.
+Missing records are kept in memory only, at most 100,000 per chain, and the walk after a restart
+finds whatever is still missing. Junk references in enough posts could fill that limit, after which
+new attachments wait for a restart. Hosts that index, store and list each other as peers therefore
+back each other up.
 
 **Response `200`.** The exact stored bytes, body or attachment, with these headers:
 
 ```
 Content-Type: <the media type the record's envelope declares>
-Cache-Control: public, max-age=31536000, immutable
+Cache-Control: public, max-age=300, must-revalidate
+ETag: "0x<the record's hash>"
 X-Content-Type-Options: nosniff
 Content-Security-Policy: default-src 'none'; sandbox
 ```
@@ -427,8 +457,10 @@ The content type comes from the record's own header: `text/…` types get `; cha
 record without a header that parses is served as `application/octet-stream`. Records are untrusted
 bytes uploaded by anyone with a post, so the last two headers stop a browser from guessing another
 type or running anything in them; an uploaded HTML or SVG file stays inert if opened directly.
-Because the URL contains the hash of the bytes, the answer for a URL can never change, which is what
-the cache header says: any cache, CDN or browser may keep it forever.
+Because the URL contains the hash of the bytes, the bytes for a URL never change, so the hash is the
+ETag. The host may still stop serving them, when its admin takes them down, so a cache may keep a
+download for five minutes and must then ask again. A request whose `If-None-Match` names the ETag
+gets `304 Not Modified` only while the host still serves the record; a takedown is checked first.
 
 **Errors**
 
@@ -438,6 +470,7 @@ the cache header says: any cache, CDN or browser may keep it forever.
 | `400` | `malformed_request` | the parser's text | a malformed query, such as `chain_id=abc` |
 | `404` | `no_store` | `this host stores no content` | a gateway-only host (`store` is `null` in the status) |
 | `404` | `content_not_found` | `unknown content hash` | nothing stored under that hash and nothing pulled: never published to this host, not vouched for by the message named, no peer had it, or pulled but only held because the message is not accepted yet |
+| `410` | `taken_down` | `this host has taken this content down` | the host's admin has taken these exact bytes down ([takedowns](GATEWAY_API.md#takedowns)), under every post. Clients show it as removed by this host and do not retry. Another host may still serve it. |
 | `502` | `chain_read_unavailable` | `could not verify anchoring; try again shortly` | the chain could not be asked whether the message named vouches for the hash; RPC details are logged server-side |
 | `503` | `host_busy` | `the host is busy; try again shortly` | upstream concurrency/rate admission or the distinct-peer-fetch pool is exhausted; retry after a short pause |
 | `503` | `index_unavailable` | `the chain index is unavailable; try again shortly` | peer-pull anchoring requires an index that is starting, backfilling or stopped; retry once ready |
@@ -449,9 +482,9 @@ the bytes. The protocol lets any host serve a record ([spec §7][spec-7]), so tr
 ### `GET /` and everything else
 
 API answers are `no-store` unless a route says otherwise: a content `404` means "not here yet",
-while a successful content download keeps its year-long `immutable` policy. Unknown `/api/*` paths
-answer `404 {"error":"no such API endpoint","code":"not_found"}`. Without `--web-dir` the host
-serves a small built-in page; with it, a gateway serves the web app
+while a successful content download may be cached for five minutes, then revalidated. Unknown
+`/api/*` paths answer `404 {"error":"no such API endpoint","code":"not_found"}`. Without `--web-dir`
+the host serves a small built-in page; with it, a gateway serves the web app
 ([GATEWAY_API.md](GATEWAY_API.md#serving-the-app)).
 
 #### `GET /` (built-in page)

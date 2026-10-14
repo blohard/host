@@ -725,9 +725,14 @@ snapshot. Keep track of the sequence your state reflects: apply events in sequen
 snapshots at their `at.sequence`. Don't mark a refresh complete until all of its pages have
 succeeded.
 
-With `gates:true`, **all** reply-gate and author-gate changes on the chain are included, not just
+With `gates:true`, reply-gate and author-gate changes from the whole chain are included, not just
 those matching the content scope, so several views kept on screen can safely share one gate ledger.
-With `gates:false`, changed record snapshots can still come back, but gate events are left out.
+Within one page's scan, a gate that changed more than once comes back once, as its newest change: a
+client applies each gate's latest value and needs no earlier one, so a gate flipped a thousand times
+costs it one change rather than a page per flip. A kept change's `old` is the gate just before that
+change, not before the previous change on the page, and sequence numbers skip the changes left out.
+The page's `through` still passes every change scanned. With `gates:false`, changed record snapshots
+can still come back, but gate events are left out.
 
 For a Posted change, the outer `event.kind` is `chain`, and the inner `event` is the complete Posted
 object shown in the receipt example below. Unlike a record snapshot, a raw Posted message has no
@@ -909,12 +914,18 @@ private upstream URLs.
 
 With no name service configured, or no verified name, the fields are null; a failed lookup returns
 503. A found name is cached for a day, and a negative or partial answer for an hour. Errors are not
-     cached, but an upstream that fails is paused for 30 seconds rather than asked again on every
-     lookup. A record the host cannot read or verify is that address's answer: null fields, cached
-     as a negative, with no pause. That covers a name that is not a DNS name, not normalized or not
-     under base.eth, a record that doesn't decode or is too large, and a resolver that refuses, runs
-     out of gas or keeps redirecting. Only a failing upstream is paused, never this host running out
-     of its own call budget.
+cached, but an upstream that fails is paused for 30 seconds rather than asked again on every lookup.
+A record the host cannot read or verify is that address's answer: null fields, cached as a negative,
+with no pause. That covers a name that is not a DNS name, not normalized or not under base.eth, a
+record that doesn't decode or is too large, and a resolver that refuses, runs out of gas or keeps
+redirecting. It also covers a Basename whose resolver breaks while running: code that halts, a
+precompile that refuses the call, or code that asks for too much memory. The host recognizes these
+only in the exact wording Base's providers use, and treats any other error as the upstream failing.
+The host also counts a timeout waiting for ENS's gateway, after ten seconds, as that name's failure
+rather than ENS's: the gateway waits about 30 seconds on a name's own offchain server, so an owner
+could otherwise pause ENS at will. That address then has no ENS name for an hour, and a basename
+shown in its place is partial. Any other failure reaching the gateway still pauses ENS. Only a
+failing upstream is paused, never this host running out of its own call budget.
 
 Up to 24 lookups run at once, which leaves some of the host's chain-call slots for receipts and
 upload checks, and up to 96 distinct addresses can wait for them; one that waits three seconds
@@ -929,10 +940,11 @@ Example answer:
 
 `source` is `ens`, `basenames` or null, and `avatar` may be null even for a verified name. An
 address with no name gets `{"name":null,"source":null,"avatar":null}`. An answer with
-`"partial": true` had a read behind it fail: the avatar's provider, or ENS while a basename
-answered. It is shown, but cached for an hour like a negative answer rather than for a day, and a
-client should keep it no longer. The address in the request stays the identity; names are display
-labels, not credentials.
+`"partial": true` had a read behind it fail: the avatar's provider, its resolver breaking or a
+timeout on its offchain records, or ENS while a basename answered, including a timeout on the
+address's own ENS records. It is shown, but cached for an hour like a negative answer rather than
+for a day, and a client should keep it no longer. The address in the request stays the identity;
+names are display labels, not credentials.
 
 For Basenames, the host reads Base's ENS L2 reverse registrar first, and falls back to the legacy
 reverse record only when the newer one is empty. A newer record that is set but invalid or
@@ -957,12 +969,13 @@ the Basenames registry before reading its address record. URLs chosen by a resol
 contacted. No reverse name or avatar lookup is needed, and the chain a transfer happens on is
 independent of the chain its recipient's name resolves on.
 
-Missing, zero or unreadable address records return `address: null`. Invalid names return 400
-`invalid_name`; an unavailable upstream or an unconfigured name service returns 503
-`name_unavailable`. The host supplies these destinations, so they carry the same trust in the host
-and its upstreams as other application reads. Clients must show the normalized name and the resolved
-address for review and submit that reviewed address, never quietly resolving again while the wallet
-asks for approval.
+Missing, zero or unreadable address records, a resolver that refuses or breaks, and a timeout on
+offchain records, return `address: null`. Invalid names return 400 `invalid_name`; an unavailable
+upstream or an unconfigured name service returns 503 `name_unavailable`, as do lookups refused at
+their line in the upstream budget. The host supplies these destinations, so they carry the same
+trust in the host and its upstreams as other application reads. Clients must show the normalized
+name and the resolved address for review and submit that reviewed address, never quietly resolving
+again while the wallet asks for approval.
 
 This route shares the per-visitor name budget and the 24 active name lookup slots. Its own queue
 holds at most 96 distinct names, with the same three-second wait for a slot and the same 30-second
@@ -1025,9 +1038,10 @@ with Open Graph and Twitter metadata rendered on the server. These routes are pu
 wallet. Post excerpts are checked against the indexed content hash before they are rendered. Profile
 cards use the verified display name when there is one, or else the wallet address, with the site's
 whale card image, or the golden key image on the keys tab. An address need not have posted to have a
-profile. Unknown chains return 404, and malformed identifiers 400. A card that cannot be built in
-time serves the app with its generic card; only an unreadable `index.html` answers 503, with
-`Retry-After`.
+profile. Unknown chains return 404, and malformed identifiers 400. A post whose body this host has
+taken down answers 410 with a card saying its content was removed by this host, and no excerpt. A
+card that cannot be built in time serves the app with its generic card; only an unreadable
+`index.html` answers 503, with `Retry-After`.
 
 Canonical URLs use the origin from the deployed HTML, never the request's Host header. Answers use
 `Cache-Control: no-store`, though social platforms may still cache their own previews. Clicking a
@@ -1044,9 +1058,10 @@ details share one anonymous bucket.
 Successful previews are cached in memory for up to 60 seconds, at most 256 entries and 256 KiB per
 HTML answer. Identical builds running at once share the work, and cache hits skip the build limits.
 A cached post card is tied to the complete indexed record and checked again before it is sent, so
-deletions and accepted reorganizations invalidate it. Changing the app's entry document also
-invalidates cached asset links. The client IP table holds at most 1024 entries, and inactive ones
-expire after five minutes. Both tables live in the process and reset on restart.
+deletions, takedowns and accepted reorganizations invalidate it, as they do a card still being
+built. Changing the app's entry document also invalidates cached asset links. The client IP table
+holds at most 1024 entries, and inactive ones expire after five minutes. Both tables live in the
+process and reset on restart.
 
 When building previews is busy, rate-limited or temporarily unavailable, valid post and profile
 links serve the app's entry document with generic metadata and HTTP 200, so visitors can still open
@@ -1207,11 +1222,13 @@ link text exactly as written in the post, including any fragment. Before fetchin
 its cache, the host looks the message up in its own index and reads its stored `text/plain` body.
 The link text must appear in that body, and the host works out the destination from it, adding HTTPS
 to a bare domain. It never uses chain RPCs or downloads from peers for this check. Unknown posts and
-chains and deleted or removed posts return 404; an unavailable index or a missing body returns 503;
-a failed store read returns 500; and a link that is not in the body returns 400 `link_not_in_post`.
-Previews need both the gateway and the store role; without a local store, the status reports them as
-off. Cache hits are keyed by URL, and they skip the post and body check and cost no visitor
-allowance.
+chains, deleted or removed posts, posts by a blocked author and posts whose body is taken down
+return 404; an unavailable index or a missing body returns 503; a failed store read returns 500; and
+a link that is not in the body returns 400 `link_not_in_post`. Previews need both the gateway and
+the store role; without a local store, the status reports them as off. Cache hits are keyed by URL
+and cost no visitor allowance. They skip the body check, but not the check of the post that asks, so
+a post that may not ask gets no cached preview either, while the same link's preview still shows for
+others.
 
 ### Draft previews
 
@@ -1304,17 +1321,21 @@ include the remaining `Retry-After`. Invalid URLs return 400.
 
 ### Configuration
 
-The optional `[gateway.link_previews]` configuration requires `public_names`: every public DNS name
-that can reach the operator's machine or home network. Before the first outside fetch, all of them
-must resolve to public IPv4 addresses. A background task starts this discovery at startup, refreshes
-it every four minutes and retries failures after fifteen seconds; requests never wait on it. A
-snapshot older than five minutes blocks new fetches until discovery succeeds again. Failures keep
-every known address but don't extend the snapshot's life. The status then reports
-`link_previews_ready: false`, with one warning when discovery becomes unavailable and an info log
-when it recovers. Old addresses expire only during a successful refresh, after a week without being
-seen. Configured hostnames stay blocked between refreshes, but a public IP that changes can leave a
-gap until the next discovery. The reverse proxy may deliberately trust LAN access through the public
-name; that trust is not what keeps the preview fetcher safe.
+The optional `[gateway.link_previews]` configuration requires `public_names`: every DNS name that
+resolves to the operator's machine itself or to anything on its network, not only the public one.
+The fetcher refuses those names and the addresses they resolve to, and always refuses private
+addresses. Behind a CDN the public name resolves to the CDN, so the origin's own names must be
+listed too, including any public address that routes back into the operator's network; an unlisted
+one is the gap. Before the first outside fetch, all of them must resolve to public IPv4 addresses. A
+background task starts this discovery at startup, refreshes it every four minutes and retries
+failures after fifteen seconds; requests never wait on it. A snapshot older than five minutes blocks
+new fetches until discovery succeeds again. Failures keep every known address but don't extend the
+snapshot's life. The status then reports `link_previews_ready: false`, with one warning when
+discovery becomes unavailable and an info log when it recovers. Old addresses expire only during a
+successful refresh, after a week without being seen. Configured hostnames stay blocked between
+refreshes, but a public IP that changes can leave a gap until the next discovery. The reverse proxy
+may deliberately trust LAN access through the public name; that trust is not what keeps the preview
+fetcher safe.
 
 ## Host policy
 
@@ -1387,6 +1408,61 @@ The errors include 400 `invalid_declaration` or `invalid_signature`; 403 `wrong_
 `index_unavailable`, `declarations_busy`, `declarations_write_pending` or
 `declarations_write_failed_restart_required`; and 500 `store_failed`. The normal visitor read budget
 applies.
+
+### Takedowns
+
+The admin can take content down by hash. The host then neither serves nor accepts those exact bytes,
+under any post: `GET /api/content/{hash}` and uploads answer 410 `taken_down`
+([STORE_API.md](STORE_API.md#get-apicontenthash)), nothing is fetched from peers for them, held
+uploads of them are dropped, share cards drop the post's excerpt and link previews are refused to
+the post. The check needs only the hash, so it holds while an index is starting or stopped. Every
+upload is checked again as the very last step before its bytes are written or held, and every
+download after its bytes are read, so a takedown takes effect for every request that has not yet
+reached that point. A write already under way when a takedown lands still completes, but those bytes
+are never served. It matches exact bytes only: a changed copy has a different hash. Bytes already
+stored stay on disk; the host just stops handing them out. Copies cached elsewhere before the
+takedown, and copies on other hosts, are beyond its reach.
+
+The list is never published: it is not in the status or the public policy object, and only the admin
+reads it. Anyone holding a hash can still learn that it was taken down, by asking for the content.
+It lives beside the host policy file, in a file named like `host-policy.takedowns.json`, which must
+exist: a host with lists does not start without a readable takedown list, so taken-down content is
+never served because the file went missing. A host with none starts it as
+`{"revision":0,"hashes":[]}`. It holds at most 4,096 hashes, and a full list refuses new takedowns
+rather than dropping any.
+
+`POST /api/host-policy/takedowns` changes the list. The JSON body has `revision` (a decimal string,
+the list's own revision), `expires` (Unix seconds), `action` (`add` or `remove`), `hashes` (1–100
+nonzero content hashes) and a hex `signature`. The admin signs this exact UTF-8 message, with the
+hashes in lowercase, in request order, and no trailing newline:
+
+```text
+Host takedown update
+Host: <configured origin>
+Revision: <revision>
+Expires: <expires>
+Action: <action>
+Hashes:
+<hash>
+<hash>
+```
+
+`POST /api/host-policy/takedowns/read` returns the list to the admin. The JSON body has `expires`
+and a hex `signature` over:
+
+```text
+Host takedown list
+Host: <configured origin>
+Expires: <expires>
+```
+
+Signatures are checked as for list edits, and the expiry must be between now and five minutes ahead.
+Both answer the list as `{"revision": "<decimal>", "hashes": ["0x…"]}`, with `no-store`. An edit is
+saved before it takes effect, and a reader disconnecting does not cancel it. The errors include 400
+`invalid_takedown_edit`, `invalid_takedown_read` or `invalid_signature`; 403 `not_host_admin`; 404
+`host_policy_disabled`; 409 `takedowns_changed`, `takedowns_full` or `takedowns_revision_exhausted`;
+503 `takedowns_busy`, `takedowns_write_pending` or `takedowns_write_failed_restart_required`; and
+500 `store_failed`. The normal visitor read budget applies.
 
 ### Host blocks
 

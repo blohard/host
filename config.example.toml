@@ -1,0 +1,202 @@
+# blohard-host configuration. Copy this file, edit it and pass it with --config.
+#
+# A host plays one or both of two roles, each with its own section below:
+#
+#   [store]    A content store. It keeps message bodies and their attachments
+#              by hash, accepts them only once the chain commits to that hash,
+#              and serves them back.
+#   [gateway]  A chain index for the web app, plus verified name lookups. With
+#              --web-dir it also serves the built web app.
+#
+# Leave a section out to run a host with only the other role. The API stays the
+# same, and the missing role's routes answer 404. Without --web-dir, a host
+# serves a small built-in page instead of the app.
+#
+# Both roles serve the Boards listed under [[chains]]. The store accepts an
+# upload that names one of these chain ids and either a message id or a
+# transaction hash, when the uploaded bytes match the content hash the chain
+# recorded. An attachment must be referenced by such a body. The gateway
+# indexes the history of the same chains.
+#
+# Each chain's index starts on its own. If its endpoint is unavailable, it
+# keeps retrying. If the endpoint reports the wrong chain id, that chain stops.
+# If the chain's history is proven to have been replaced, every index stops. A
+# store-only host checks all its endpoints before it starts serving.
+#
+# The host never publishes rpc_url, so it may carry an API key. The indexing
+# start and the poll interval stay private too. /api/status publishes each
+# chain's name, contract, public_rpc_url, start_block, curated, blocking and
+# confirmations.
+#
+# Top-level settings must come before the first [table] line: in TOML, a key
+# written after a table header belongs to that table.
+
+# One line the app shows every visitor, under the chain name and on its about
+# page. Leave it out for none.
+# notice = "beta test: content may disappear"
+
+# The RPC budget for this host, shared by every chain and name lookup. These
+# are the defaults. The budget refills continuously, and a full budget holds
+# one minute's calls. Calls made for visitors stop short of the last
+# reserved_for_ingestion calls, so indexing can always continue. The reserve is
+# a floor under the remaining budget, not a separate allowance per minute, and
+# it must be below calls_per_minute. Name lookups stop earlier, halfway between
+# the reserve and a full budget, so a flood of them leaves the rest for checking
+# uploads and receipts and for indexing. Set calls_per_minute to zero to turn
+# metering off, for example with your own node; the other limits still apply.
+# Separately, at most 28 visitor calls and four indexing calls run at once.
+# Size the budget to your provider's plan and anything else that shares it.
+[upstream]
+calls_per_minute = 1200
+reserved_for_ingestion = 300
+
+# Each [[chains]] entry is a Board this host serves. /api/status lists the
+# chains in this order, and the app opens the first one by default.
+#
+# This one is a local test chain, such as anvil started with --chain-id 810337.
+# Avoid 31337: wallets already know a localhost network by that id, and it is
+# also a registered public testnet.
+[[chains]]
+id = 810337
+name = "anvil"
+# The private endpoint. It must answer eth_getBlockReceipts and eth_getLogs.
+rpc_url = "http://127.0.0.1:8545"
+# The Board has the same address on every chain, because it is deployed
+# through the CREATE2 deployer (protocol SPEC.md §9).
+contract = "0xca3E637985f1866b92e56fCf82Bae7cbf479c7Bf"
+# Optional. A public endpoint that wallets use to add the chain. The app reads
+# through the host's index instead. The host has no JSON-RPC proxy of its own,
+# so this must be a separate endpoint; a reverse proxy may serve it at
+# /rpc/<chain id>.
+public_rpc_url = "http://127.0.0.1:8545"
+# The block the Board was deployed in.
+start_block = 1
+# Optional. The earliest block the index needs: no later than the deployment of
+# the Board or of any list registry it reads, whichever is older. With a
+# registry configured, leaving this out means reading from block 0, and the
+# host logs an error saying so. Without a registry it defaults to start_block.
+# index_start_block = 0
+# How far behind the chain's head a block must be before the host accepts it.
+# Uploads proved by a transaction hash wait for this depth too. If the index
+# later finds a contradiction, it stops, and recovery means rebuilding it. Zero
+# suits anvil. On a real chain, choose a depth you are willing to rely on.
+confirmations = 0
+# Seconds to wait between polls once the index has caught up (default 1). A
+# larger value, such as 5, saves calls on a metered endpoint, but new posts
+# show up later. Every block in between is still read. While catching up, the
+# index reads without waiting, and after an RPC failure it waits 1 to 30
+# seconds before trying again.
+poll_interval_secs = 1
+# Optional. The blocking setup this host suggests to the app: the shared
+# AuthorBlocklistGate (deployed by the protocol's script/DeployGates.s.sol) and
+# the name of the registry list it reads. /api/status always publishes the
+# registry and list as blocklist, so the app can hide replies from blocked
+# accounts. It publishes blocking, with the gate, only after checking the
+# gate's code and settings on chain.
+# blocking = { gate = "0x4A3206b83a43094F6E32d39f3D7a24B667fb86a8", registry = "0x0aE4C0c4e9D17816C79AE140A6E3466ffC14b791", list = "blocked" }
+# Optional. The shared AuthorKeyGate and AuthorKeyBlocklistGate for this Board
+# and key market (from blohard/account-keys). Leave either out until it is
+# deployed. The app applies these gates again to replies already posted, both
+# when an account sets one and when a single message does. The combined gate
+# must use the registry and list from blocking above. It is published only
+# after its own check and the plain blocklist gate's check both pass.
+# key_gates = { holders = "0x62653E324dE74404493eDcB3E1375f572B6e8292", holders_blocklist = "0x48AeE1fee1b227eE1E34A58ac313E95e623C7e2C" }
+# Optional. A gate that closes a thread to new replies, and can reopen it. It
+# is published once it answers canReply with false and has none of the other
+# gates' getters.
+# closed_gate = "0x82f6C7E5f9E64C7083162aBC22D71d8d394164AA"
+
+# Base. Every contract has the same address as above. The indexing start is the
+# list registry's deployment, which is older than the Board's.
+# [[chains]]
+# id = 8453
+# name = "base"
+# rpc_url = "https://base-mainnet.example/v2/KEY"
+# contract = "0xca3E637985f1866b92e56fCf82Bae7cbf479c7Bf"
+# public_rpc_url = "https://mainnet.base.org"
+# start_block = 52182575
+# index_start_block = 51046477
+# confirmations = 2
+# poll_interval_secs = 2
+# blocking = { gate = "0x4A3206b83a43094F6E32d39f3D7a24B667fb86a8", registry = "0x0aE4C0c4e9D17816C79AE140A6E3466ffC14b791", list = "blocked" }
+# key_gates = { holders = "0x62653E324dE74404493eDcB3E1375f572B6e8292", holders_blocklist = "0x48AeE1fee1b227eE1E34A58ac313E95e623C7e2C" }
+# closed_gate = "0x82f6C7E5f9E64C7083162aBC22D71d8d394164AA"
+
+# Optional. Lists this host keeps for itself: curated accounts, blocked
+# accounts and accounts labeled as bots. They apply on every chain. Create the
+# file with {"revision":0,"curated":[],"blocked":[],"bots":[]} before starting
+# the host; the host is its only writer. Create host-policy.takedowns.json
+# beside it with {"revision":0,"hashes":[]}: the admin's takedown list, which
+# the host never publishes. A host with lists does not start without it. Edits must be signed by admin, either
+# an ordinary account or a contract wallet whose signatures are checked on
+# admin_chain, which must be one of the chains above. Signatures name origin,
+# the site where the admin signs, so they can't be replayed against another
+# host.
+# [host_policy]
+# file = "/var/lib/blohard/host-policy.json"
+# admin = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+# admin_chain = 810337
+# origin = "https://board.example"
+
+# ---- the content-store role -------------------------------------------------
+# Present, even empty, to store message bodies. Remove the whole section to run
+# a gateway that stores nothing.
+[store]
+# Optional. Other hosts this one knows, as base URLs. They are published in the
+# status. When a reader asks for a record this host lacks, and names the
+# message that commits to it, the host asks these peers, and checks what they
+# return just like an upload before storing it.
+# peers = ["https://other.example"]
+# Memory for each content store's key index, in MiB (default 64): what stays in
+# RAM between reads. A host with memory to spare can raise it.
+page_cache_mib = 64
+# The largest message body stored, in bytes, including the envelope header
+# (default 4000, about two dense paragraphs; at most 1 MiB). It is published in
+# the status, so the app's composer stops there before any gas is spent.
+max_body_bytes = 4000
+
+# Attachments (protocol SPEC.md §7): records a message body references as
+# `record:0x<hash>`. The host stores one only when it already holds, or is
+# holding, a body that references it. Remove this table to store bodies only.
+[store.attachments]
+max_bytes = 2097152        # 2 MiB per attachment (at most 16 MiB)
+max_per_message = 4        # references honored per body, in order of appearance
+# Optional. Store only these media types as attachments (default: any type).
+# These are the images the web app shows.
+# media_types = ["image/png", "image/jpeg", "image/gif", "image/webp", "image/avif"]
+
+# ---- the gateway role -------------------------------------------------------
+# Present, even empty, to index each chain above and serve the app's reads.
+# Remove the whole section to run a content store only.
+[gateway]
+# Optional. Readable names: ENS on Ethereum mainnet first, then Basenames on
+# Base. The host shows a name only when the account's reverse record and the
+# name's forward resolution agree. The upstream URLs stay private, and browsers
+# get no name RPC of their own. Without this table, the app shows addresses.
+# Avatars given as HTTPS or IPFS links are supported; NFT avatars are not
+# looked up.
+# [gateway.names]
+# ethereum_upstream = "https://eth-mainnet.example/v2/KEY"
+# base_upstream = "https://base-mainnet.example/v2/KEY"
+
+# Optional. Previews of web links in posts. Off when this table is absent.
+# They need a ready gateway index and a local body store. List every DNS name
+# that resolves to this server itself or to anything on its network, not only
+# the public one: the fetcher refuses those names and the addresses they
+# resolve to, and always refuses private addresses, so a preview can't reach
+# back into a network whose reverse proxy may trust local requests. Behind a
+# CDN the public name resolves to the CDN, so list the origin's own names too,
+# including any public address that routes back into your network. The first
+# name also identifies this host to the sites it fetches. The fetcher uses
+# IPv4 and reads HTML only.
+# [gateway.link_previews]
+# public_names = ["board.example", "other-public-name.example"]
+
+# Optional. An index of an account-keys market (blohard/account-keys), one per
+# chain that has one. Each needs the gateway role, and uses its chain's private
+# endpoint and confirmation depth from [[chains]]. It is stored apart from the
+# Board's index.
+# [[keyrings]]
+# chain = 8453
+# market = "0x6E6674Cd2Df37812C5c729a68CA881FFC22A49E4"
+# start_block = 52256362

@@ -11,12 +11,13 @@ use anyhow::Result;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
+    collections::HashMap,
     fmt,
     sync::{
         Arc, Mutex, PoisonError,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 use tokio::sync::{Semaphore, SemaphorePermit};
 
@@ -215,6 +216,8 @@ pub struct Upstream {
     client_limiter: Arc<Limiter>,
     ingestion_limiter: Arc<Limiter>,
     counters: Arc<Counters>,
+    // Keys are configured RPC URLs, never URLs supplied by a caller or resolver.
+    cooldowns: Arc<Mutex<HashMap<String, Instant>>>,
 }
 
 impl Upstream {
@@ -228,12 +231,48 @@ impl Upstream {
             )),
             ingestion_limiter: Arc::new(Limiter::new(INGESTION_SLOTS, UPSTREAM_WAIT)),
             counters: Arc::default(),
+            cooldowns: Arc::default(),
         }
     }
 
     /// No budget: development mode and tests that meter nothing.
     pub fn unlimited(client: reqwest::Client) -> Self {
         Self::new(client, Budget::unlimited())
+    }
+
+    fn check_cooldown(&self, url: &str) -> Result<(), RpcError> {
+        let now = Instant::now();
+        let mut cooldowns = self
+            .cooldowns
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        cooldowns.retain(|_, until| *until > now);
+        match cooldowns.get(url) {
+            Some(until) => Err(RpcError::RateLimited(*until - now)),
+            None => Ok(()),
+        }
+    }
+
+    fn pause(&self, url: &str, delay: Duration) -> RpcError {
+        let now = Instant::now();
+        let mut cooldowns = self
+            .cooldowns
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        cooldowns.retain(|_, until| *until > now);
+        let until = cooldowns.entry(url.to_owned()).or_insert(now);
+        // A late response may extend a pause, but must never shorten it.
+        *until = (*until).max(now + delay);
+        RpcError::RateLimited(*until - now)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn expire_cooldown(&self, url: &str) {
+        let mut cooldowns = self.cooldowns.lock().unwrap();
+        let until = cooldowns
+            .get_mut(url)
+            .expect("endpoint must be cooling down");
+        *until = Instant::now();
     }
 
     pub fn counts(&self) -> UpstreamCounts {
@@ -260,6 +299,8 @@ pub enum RpcError {
     /// Too many calls to the node are out already; the caller should answer
     /// busy and the client try again shortly.
     Busy,
+    /// This endpoint asked us to wait. No upstream slot is held during the pause.
+    RateLimited(Duration),
 }
 
 impl fmt::Display for RpcError {
@@ -270,6 +311,11 @@ impl fmt::Display for RpcError {
             Self::BadResult(e) => f.write_str(e),
             Self::TooLarge(bound) => write!(f, "upstream response over {bound} bytes"),
             Self::Busy => f.write_str("the host is busy; try again shortly"),
+            Self::RateLimited(wait) => write!(
+                f,
+                "upstream rate limited; try again in {} seconds",
+                wait.as_secs_f64().ceil() as u64
+            ),
         }
     }
 }
@@ -277,9 +323,13 @@ impl fmt::Display for RpcError {
 impl RpcError {
     /// Nothing about the request itself failed: the endpoint could not be
     /// reached, answered with something other than JSON, or this host had no
-    /// slot free. The same request may succeed a moment later.
+    /// slot free, or asked for a rate-limit pause. The same request may succeed
+    /// a moment later.
     pub fn is_transient(&self) -> bool {
-        matches!(self, Self::Unreachable(_) | Self::NotJson(_) | Self::Busy)
+        matches!(
+            self,
+            Self::Unreachable(_) | Self::NotJson(_) | Self::Busy | Self::RateLimited(_)
+        )
     }
 }
 
@@ -315,12 +365,16 @@ pub async fn call_as(
 ) -> Result<Value, RpcError> {
     let body = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
     let admitted = async {
+        upstream.check_cooldown(url)?;
         upstream.budget.take(class).await?;
         let limiter = match class {
             Class::Client | Class::Names => &upstream.client_limiter,
             Class::Ingestion => &upstream.ingestion_limiter,
         };
-        limiter.slot().await.ok_or(RpcError::Busy)
+        let slot = limiter.slot().await.ok_or(RpcError::Busy)?;
+        // Another request may have been throttled while this one waited.
+        upstream.check_cooldown(url)?;
+        Ok(slot)
     }
     .await;
     upstream.counters.of(class).count(admitted.is_err());
@@ -332,6 +386,13 @@ pub async fn call_as(
         .send()
         .await
         .map_err(|e| RpcError::Unreachable(e.without_url().to_string()))?;
+    let retry_after = retry_after(resp.headers(), SystemTime::now());
+    if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || (resp.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE && retry_after.is_some())
+    {
+        // Do not read a possibly large or non-JSON error body.
+        return Err(upstream.pause(url, retry_after.unwrap_or(DEFAULT_COOLDOWN)));
+    }
     if resp
         .content_length()
         .is_some_and(|n| n > max_response as u64)
@@ -349,7 +410,55 @@ pub async fn call_as(
         }
         buf.extend_from_slice(&chunk);
     }
-    serde_json::from_slice(&buf).map_err(|e| RpcError::NotJson(e.to_string()))
+    let answer: Value =
+        serde_json::from_slice(&buf).map_err(|e| RpcError::NotJson(e.to_string()))?;
+    if answer.get("error").is_some_and(rate_throttle) {
+        return Err(upstream.pause(url, retry_after.unwrap_or(DEFAULT_COOLDOWN)));
+    }
+    Ok(answer)
+}
+
+const DEFAULT_COOLDOWN: Duration = Duration::from_secs(2);
+const MAX_COOLDOWN: Duration = Duration::from_secs(300);
+
+/// Retry-After permits seconds or an HTTP date. Bound provider-controlled
+/// delays so a mistaken date cannot disable this endpoint indefinitely.
+fn retry_after(headers: &reqwest::header::HeaderMap, now: SystemTime) -> Option<Duration> {
+    let value = headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim();
+    let delay = if !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()) {
+        Duration::from_secs(value.parse::<u64>().unwrap_or(u64::MAX))
+    } else {
+        httpdate::parse_http_date(value)
+            .ok()?
+            .duration_since(now)
+            .unwrap_or_default()
+    };
+    Some(delay.clamp(Duration::from_secs(1), MAX_COOLDOWN))
+}
+
+/// -32005 also means query/result limits: the code alone is not a throttle.
+/// Revert errors are left alone even when a contract chooses these words.
+fn rate_throttle(error: &Value) -> bool {
+    match error["code"].as_i64() {
+        Some(429) => true,
+        Some(-32005) => error["message"].as_str().is_some_and(|message| {
+            let message = message.to_ascii_lowercase();
+            [
+                "rate limit",
+                "rate-limit",
+                "too many requests",
+                "requests per second",
+                "request rate",
+            ]
+            .iter()
+            .any(|phrase| message.contains(phrase))
+        }),
+        _ => false,
+    }
 }
 
 /// A nullable RPC result. Only an explicit null means absence; errors and
@@ -429,6 +538,7 @@ pub fn error_data(error: &Value) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod throttle;
 
     #[test]
     fn revert_data_allows_only_three_nested_wrappers() {

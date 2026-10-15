@@ -16,7 +16,7 @@ use axum::{
     extract::DefaultBodyLimit,
     http::{
         HeaderValue, Method, Request, StatusCode,
-        header::{CACHE_CONTROL, CONTENT_TYPE},
+        header::{CACHE_CONTROL, CONTENT_TYPE, RETRY_AFTER},
     },
     middleware::{self, Next},
     response::{Html, Response},
@@ -294,7 +294,8 @@ pub fn router(state: Arc<AppState>, web_dir: Option<PathBuf>) -> Router {
             CorsLayer::new()
                 .allow_origin(Any)
                 .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
-                .allow_headers([CONTENT_TYPE]),
+                .allow_headers([CONTENT_TYPE])
+                .expose_headers([RETRY_AFTER]),
         );
     // Preview fetches are app-origin only; the public API's permissive CORS
     // policy must not authorize browser calls to these resource-consuming routes.

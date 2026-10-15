@@ -70,7 +70,7 @@ pub struct Node {
     /// 503 instead of a JSON-RPC answer, as an overloaded provider does.
     pub log_outage: AtomicU64,
     /// How many upcoming eth_getLogs requests are refused with a JSON-RPC
-    /// error, as a rate-limiting provider does.
+    /// error, as a provider imposing a log-query limit does.
     pub log_refusals: AtomicU64,
     /// How many of the next `eth_getLogs` answers carry a log whose block
     /// number is not a quantity, whatever the range.
@@ -490,7 +490,7 @@ async fn answer(node: Arc<Node>, req: Value) -> Json<Value> {
         Some("eth_getLogs") => {
             if node.log_refusals.load(Ordering::Relaxed) > 0 {
                 node.log_refusals.fetch_sub(1, Ordering::Relaxed);
-                return rpc_error(-32005, "rate limited".into());
+                return rpc_error(-32005, "query limit exceeded".into());
             }
             if node.malformed_logs.load(Ordering::Relaxed) > 0 {
                 node.malformed_logs.fetch_sub(1, Ordering::Relaxed);

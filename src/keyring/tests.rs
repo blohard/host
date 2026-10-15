@@ -1503,7 +1503,7 @@ fn provider_failures_remain_retryable_and_recover() {
         running.node.block_receipts.store(false, Ordering::Relaxed);
         running.node.response_overrides.lock().unwrap().insert(
             "eth_getLogs".into(),
-            json!({"jsonrpc":"2.0","id":1,"error":{"code":-32005,"message":"rate limited"}}),
+            json!({"jsonrpc":"2.0","id":1,"error":{"code":-32005,"message":"query limit exceeded"}}),
         );
         let error = index
             .poll(&state.verifier, 2000, &mut None)
@@ -1749,7 +1749,7 @@ fn a_block_replaced_during_an_empty_receipts_read_is_not_committed() {
         running.node.set_head(25);
         running.node.response_overrides.lock().unwrap().insert(
             "eth_getLogs".into(),
-            json!({"jsonrpc":"2.0","id":1,"error":{"code":-32005,"message":"rate limited"}}),
+            json!({"jsonrpc":"2.0","id":1,"error":{"code":-32005,"message":"query limit exceeded"}}),
         );
         *running.node.replace_after_read.lock().unwrap() = Some(mock_node::Replacement {
             block: 13,
@@ -1784,7 +1784,7 @@ fn persistent_refusals_without_receipts_stop_the_keyring() {
         let refuse = || {
             running.node.response_overrides.lock().unwrap().insert(
                 "eth_getLogs".into(),
-                json!({"jsonrpc":"2.0","id":1,"error":{"code":-32005,"message":"rate limited"}}),
+                json!({"jsonrpc":"2.0","id":1,"error":{"code":-32005,"message":"query limit exceeded"}}),
             );
         };
         let allow = || running.node.response_overrides.lock().unwrap().clear();
@@ -1888,6 +1888,34 @@ fn receipts_over_the_bound_stop_the_keyring_with_its_journal_intact() {
             12,
             "history before it is kept"
         );
+        running.stop().await;
+    });
+}
+
+#[test]
+fn keyring_rate_throttle_does_not_try_smaller_ranges_or_receipts() {
+    with_node("keyring-rate-throttle", |ctx| async move {
+        let (running, state, index) = seeded_index(&ctx).await;
+        running.node.set_head(30);
+        running.node.response_overrides.lock().unwrap().insert(
+            "eth_getLogs".into(),
+            json!({"error":{"code":-32005,"message":"rate limited"}}),
+        );
+        let before = running.node.count("eth_getLogs");
+        let mut refused = None;
+        assert!(
+            index
+                .poll(&state.verifier, 2000, &mut refused)
+                .await
+                .is_err()
+        );
+        assert_eq!(running.node.count("eth_getLogs"), before + 1);
+        assert_eq!(running.node.count("eth_getBlockReceipts"), 0);
+        assert_eq!(
+            refused, None,
+            "throttling cannot count toward stopping the keyring"
+        );
+        assert_eq!(model(&index).checkpoint.unwrap().block, 12);
         running.stop().await;
     });
 }

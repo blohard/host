@@ -90,6 +90,8 @@ pub enum VerifyError {
     IndexUnavailable,
     /// Too many calls to the node are out; try again shortly.
     Busy,
+    /// The provider requested a pause; preserve its wait through upload checks.
+    RateLimited(Duration),
 }
 
 impl fmt::Display for VerifyError {
@@ -101,6 +103,7 @@ impl fmt::Display for VerifyError {
                 f.write_str("the chain index is unavailable; try again shortly")
             }
             Self::Busy => f.write_str("the host is busy; try again shortly"),
+            Self::RateLimited(wait) => RpcError::RateLimited(*wait).fmt(f),
         }
     }
 }
@@ -111,6 +114,7 @@ impl From<RpcError> for VerifyError {
     fn from(e: RpcError) -> Self {
         match e {
             RpcError::Busy => Self::Busy,
+            RpcError::RateLimited(wait) => Self::RateLimited(wait),
             other => Self::Rpc(other.to_string()),
         }
     }
@@ -766,10 +770,11 @@ mod tests {
         *a.node.simulation_error.lock().unwrap() =
             Some(json!({"code": -32005, "message": "rate limited"}));
         match v.message_at(1, 1, None).await {
-            Err(VerifyError::Rpc(msg)) => assert!(msg.contains("rate limited"), "{msg}"),
+            Err(VerifyError::RateLimited(wait)) => assert_eq!(wait, Duration::from_secs(2)),
             other => panic!("expected a retryable error, got {other:?}"),
         }
-        // A revert reported with the standard code is still a missing message.
+        // After the endpoint cooldown, a revert is still a missing message.
+        v.chain(1).unwrap().0.expire_cooldown(&a.url);
         *a.node.simulation_error.lock().unwrap() =
             Some(json!({"code": 3, "message": "execution reverted", "data": "0x"}));
         assert!(matches!(

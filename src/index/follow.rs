@@ -191,6 +191,7 @@ pub async fn advance(
             Ok(logs) if logs.len() <= max_events => break (logs, through),
             Ok(logs) if to == from => return Err(too_dense(from, logs.len(), max_events)),
             Err(Fetch::Busy) => return Err(anyhow!("no upstream slot free")),
+            Err(Fetch::Throttled(error)) => return Err(error.into()),
             Err(Fetch::Transient(error)) if to == from => return Err(error),
             Err(Fetch::Refused) if to == from => {
                 let logs = receipt_logs(

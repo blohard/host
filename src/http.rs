@@ -11,7 +11,10 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde_json::{Value, json};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::{
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    time::Duration,
+};
 
 #[derive(Debug, Clone)]
 pub struct ApiError {
@@ -19,6 +22,7 @@ pub struct ApiError {
     pub code: &'static str,
     pub message: String,
     pub revert: Option<String>,
+    retry_after: Option<Duration>,
 }
 
 fn is_code(text: &str) -> bool {
@@ -40,6 +44,7 @@ impl ApiError {
             code,
             message: message.into(),
             revert: None,
+            retry_after: None,
         }
     }
 
@@ -97,6 +102,17 @@ impl ApiError {
         )
     }
 
+    /// The provider asked us to wait; keep its bounded wait for the client.
+    pub fn rate_limited(wait: Duration) -> Self {
+        let mut error = Self::said(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "chain_read_unavailable",
+            "the chain provider is busy; try again shortly",
+        );
+        error.retry_after = Some(wait);
+        error
+    }
+
     pub fn unavailable(error: impl std::fmt::Debug) -> Self {
         tracing::warn!(?error, "application chain read failed");
         Self::new(StatusCode::BAD_GATEWAY, "chain_read_unavailable")
@@ -111,7 +127,19 @@ impl IntoResponse for ApiError {
         if let Some(revert) = self.revert {
             body["revert"] = json!(revert);
         }
-        (self.status, Json(body)).into_response()
+        let mut response = (self.status, Json(body)).into_response();
+        if let Some(wait) = self.retry_after {
+            // Round up so a fractional second cannot prompt an early retry.
+            let seconds = wait
+                .as_secs()
+                .saturating_add(u64::from(wait.subsec_nanos() != 0))
+                .max(1);
+            response.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                seconds.to_string().parse().expect("numeric retry delay"),
+            );
+        }
+        response
     }
 }
 
@@ -119,6 +147,7 @@ impl From<RpcError> for ApiError {
     fn from(error: RpcError) -> Self {
         match error {
             RpcError::Busy => Self::new(StatusCode::SERVICE_UNAVAILABLE, "host_busy"),
+            RpcError::RateLimited(wait) => Self::rate_limited(wait),
             other => Self::unavailable(other),
         }
     }
@@ -147,6 +176,7 @@ impl From<VerifyError> for ApiError {
                 )
             }
             VerifyError::Busy => Self::busy(),
+            VerifyError::RateLimited(wait) => Self::rate_limited(wait),
             VerifyError::IndexUnavailable => Self::said(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "index_unavailable",
@@ -398,6 +428,25 @@ mod tests {
                 revert.as_deref()
             );
             assert!(!String::from_utf8_lossy(&bytes).contains("secret"));
+        }
+    }
+
+    #[tokio::test]
+    async fn throttle_survives_verification_and_http_conversion() {
+        for error in [
+            ApiError::from(RpcError::RateLimited(Duration::from_millis(1501))),
+            ApiError::from(VerifyError::from(RpcError::RateLimited(
+                Duration::from_millis(1501),
+            ))),
+        ] {
+            let response = error.into_response();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(response.headers()["retry-after"], "2");
+            let bytes = axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap();
+            let body: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["code"], "chain_read_unavailable");
         }
     }
 }

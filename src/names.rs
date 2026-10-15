@@ -210,13 +210,14 @@ impl Names {
 
     async fn fetch_display_identity(&self, address: Address) -> Result<Entry> {
         // ENS failing ahead of a basename leaves it partial, whether the
-        // provider or the address's own records failed. Only the provider
-        // failing leaves no answer to keep.
+        // provider or the address's own records failed. Capacity limits
+        // instead retry without caching a fallback.
         let mut ens_failed = None;
         if let Some(url) = &self.ethereum {
             match self.ask("ens", || self.ens(url, address)).await {
                 Ok(Some(found)) => return Ok(found),
                 Ok(None) => {}
+                Err(error) if temporarily_limited(&error) => return Err(error),
                 Err(error) => ens_failed = Some(error),
             }
         }
@@ -277,8 +278,8 @@ impl Names {
     /// any absent name. `Err(RecordFailed)` when a name's own resolver broke
     /// while running, or the wait for its offchain records timed out; the
     /// caller decides what that means for its answer, and it never pauses an
-    /// upstream. Any other `Err` is the provider or the gateway failing, which
-    /// pauses it for every address.
+    /// upstream. Capacity limits retry without cached answers. Other errors
+    /// mean the provider or gateway failed and pause it for every address.
     async fn call(
         &self,
         url: &str,
@@ -449,20 +450,21 @@ impl Names {
             gateways: vec![BATCH_GATEWAY.into()],
         };
         // A missing or unreadable record is the name having no avatar. A
-        // failure, the provider's or the name's own, leaves the name partial.
-        let avatar = self
-            .call(url, UNIVERSAL, call.abi_encode(), CallPolicy::Universal)
-            .await
-            .map(|bytes| {
-                let resolved =
-                    resolveWithGatewaysCall::abi_decode_returns_validate(&bytes?).ok()?;
-                textCall::abi_decode_returns_validate(&resolved.result).ok()
-            });
+        // failure leaves the name partial, unless it is a capacity limit.
+        let (avatar, partial) = avatar_result(
+            self.call(url, UNIVERSAL, call.abi_encode(), CallPolicy::Universal)
+                .await
+                .map(|bytes| {
+                    let resolved =
+                        resolveWithGatewaysCall::abi_decode_returns_validate(&bytes?).ok()?;
+                    textCall::abi_decode_returns_validate(&resolved.result).ok()
+                }),
+        )?;
         Ok(Some(Entry {
             name: Some(primary),
             source: Some("ens"),
-            partial: avatar.is_err(),
-            avatar: avatar.ok().flatten().and_then(avatar_url),
+            partial,
+            avatar,
         }))
     }
 
@@ -560,8 +562,8 @@ impl Names {
             return Ok(None);
         }
         // A resolver that breaks here leaves the name verified but partial.
-        let avatar = self
-            .call(
+        let (avatar, partial) = avatar_result(
+            self.call(
                 url,
                 &resolver,
                 textCall {
@@ -572,12 +574,13 @@ impl Names {
                 CallPolicy::Resolver,
             )
             .await
-            .map(|bytes| textCall::abi_decode_returns_validate(&bytes?).ok());
+            .map(|bytes| textCall::abi_decode_returns_validate(&bytes?).ok()),
+        )?;
         Ok(Some(Entry {
             name: Some(primary),
             source: Some("basenames"),
-            partial: avatar.is_err(),
-            avatar: avatar.ok().flatten().and_then(avatar_url),
+            partial,
+            avatar,
         }))
     }
 }
@@ -626,13 +629,28 @@ impl std::error::Error for RecordFailed {}
 
 /// Whether a failed question says the provider is failing. This host's own
 /// limiter turning the call away says nothing about the provider, and a
-/// name's own records failing is that name's alone.
+/// name's own records failing is that name's alone. Explicit rate throttles
+/// already pause the endpoint in the RPC transport.
 fn blames_the_provider(error: &anyhow::Error) -> bool {
-    !error.is::<RecordFailed>()
-        && !matches!(
-            error.downcast_ref::<rpc::RpcError>(),
-            Some(rpc::RpcError::Busy)
-        )
+    !error.is::<RecordFailed>() && !temporarily_limited(error)
+}
+
+/// Capacity limits are retryable, not evidence about a name's records.
+fn temporarily_limited(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<rpc::RpcError>(),
+        Some(rpc::RpcError::Busy | rpc::RpcError::RateLimited(_))
+    )
+}
+
+/// An avatar and whether its lookup was partial. Congestion must remain an
+/// error so it cannot become an hour-long cached partial name.
+fn avatar_result(answer: Result<Option<String>>) -> Result<(Option<String>, bool)> {
+    match answer {
+        Ok(avatar) => Ok((avatar.and_then(avatar_url), false)),
+        Err(error) if temporarily_limited(&error) => Err(error),
+        Err(_) => Ok((None, true)),
+    }
 }
 
 /// Turns a name's own records failing into `Ok(None)`: for a call the answer

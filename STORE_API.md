@@ -111,6 +111,25 @@ and the calls counted here are not a provider's weighted billing units, so this 
 a monthly bill. The separate relayer and other host processes have their own traffic. Clients should
 handle 503 and back off, rather than treat the configured rate as their own allowance.
 
+The transport also pauses a configured endpoint when it answers HTTP 429, HTTP 503 with a valid
+`Retry-After`, JSON-RPC code 429, or code -32005 with an explicit request-rate message (such as
+"rate limit exceeded", "too many requests" or "project ID request rate exceeded"). The code -32005 alone is not enough: providers also
+use it for oversized log queries. `Retry-After` accepts seconds or an HTTP date, bounded to one
+second through five minutes; without a valid value, the pause is two seconds. Calls during the
+pause fail as retryable upstream errors before spending tokens or taking slots. A call already
+waiting for a slot checks again before sending, and calls already sent may finish. The pause is
+shared across classes using that exact configured endpoint URL; other endpoints and cached or
+indexed reads keep working. It does not coordinate with other processes or replace their budgets.
+Live chain reads, including upload verification, answer 503 `chain_read_unavailable` during this
+pause, with a numeric `Retry-After` rounded up to the next second. Gateway routes that already allow cross-origin reads
+expose this header to those clients. Name lookups also answer 503 without caching a partial or missing name;
+they add no separate 30-second name-provider pause.
+
+Both chain followers retain their checkpoint and retry a throttled read without shrinking its log
+range or trying receipts. Query-size limits and ambiguous refusals still narrow the range and use
+the single-block receipts fallback. A provider that never identifies its throttle may therefore
+still be handled as a query refusal.
+
 ### Visitor admission
 
 Each visitor has a budget for work that reads the chain live: reply admission checks, gas estimates
@@ -151,7 +170,7 @@ The top-level `upstream` field, null in development mode, counts this host's cal
 upstreams since it started, by class:
 `{client: {calls, busy}, names: {calls, busy}, ingestion: {calls, busy}}`, where `names` counts name
 lookups apart from other client work. `calls` were sent; `busy` were refused by the shared budget or
-the concurrency limit before any call was made. A rising `client.busy` with a flat `ingestion.busy`
+the concurrency limit, or suppressed by an endpoint pause before any call was made. A rising `client.busy` with a flat `ingestion.busy`
 is the budget doing its job under client load; a rising `ingestion.busy` means the follower itself
 is being held back.
 
@@ -225,11 +244,13 @@ for its accepted index.
 
 For a pending post signed by a contract wallet, a signature the wallet rejects answers 403. If the
 RPC provider fails or answers nonsense while the host reads the wallet's code or checks its
-signature, the upload answers 502; if this host's own upstream limits are full, 503. None of these
+signature, the upload answers 502; explicit provider throttles and this host's own upstream limits
+answer 503. Provider throttles include `Retry-After`. None of these
 failures hold any bytes. Keep the upload and retry it unchanged after a pause.
 
 A transaction or receipt counts as missing or pending only when the RPC endpoint explicitly answers
-null. Provider errors and malformed transaction or receipt fields answer 502. The background task
+null. Explicit provider throttles answer 503 with `Retry-After`; other provider errors and malformed
+transaction or receipt fields answer 502. The background task
 that promotes held uploads keeps the bytes and backs off on these failures; it never takes a missing
 status or a malformed event to mean that the transaction reverted or did not post.
 
@@ -362,7 +383,7 @@ come after the proof:
 | `404` | `transaction_not_found` | `chain <C> has no transaction 0x…: send it first, then upload` | the chain's RPC does not know the transaction yet. Also what a lagging RPC returns for a transaction sent moments ago; see the retry guidance below. |
 | `403` | `not_board_transaction` / `not_a_post` / `transaction_reverted` | `transaction 0x… is not sent to the board` / `… is not a post` / `… reverted` | the transaction cannot anchor anything on this board |
 | `403` | `signature_invalid` | `transaction 0x… names an author whose signature does not verify` | a pending `postBySig` whose signature the named author did not make (checked as the Board will check it: the signature recovers to the author, or the author has code and accepts it through ERC-1271). Refused before it can take a holding slot in that author's name. |
-| `403` | `not_anchored` | `not anchored on-chain: chain <C> has no message <M> (eth_call failed: …)` | the core contract reverted: no such message id at the block asked, which a lagging RPC also answers for a post mined moments ago; see the retry guidance below. A provider error that is not a revert, such as a rate limit, is answered 502 instead. |
+| `403` | `not_anchored` | `not anchored on-chain: chain <C> has no message <M> (eth_call failed: …)` | the core contract reverted: no such message id at the block asked, which a lagging RPC also answers for a post mined moments ago; see the retry guidance below. A provider error is answered 502 instead, or 503 with `Retry-After` for a recognized rate throttle. |
 | `403` | `host_blocked` | `posting blocked by host` | the host's policy blocks the post's author ([host blocks](GATEWAY_API.md#host-blocks)). Held uploads by a blocked author are dropped too. |
 | `410` | `taken_down` | `this host has taken this content down` | the host's admin has taken these bytes down, so it accepts them under no post. Checked before anything is asked of the chain. |
 | `410` | `message_gone` | `this post has been deleted or removed, so this host takes none of its content` | the post's author deleted it or its parent's author removed it ([spec §5.6][spec]), or a pending post is created already deleted. This covers its body and its attachments. A held upload whose post is deleted before it is accepted is dropped, and nothing is copied from peers for such a post. Another live post with the same bytes still stores them. |
@@ -371,6 +392,7 @@ come after the proof:
 | `403` | `attachment_not_referenced` | `chain <C> message <M> does not reference 0x… within its first <K> record references` | the message's body does not list this record among the references this host honours (only `text/plain` bodies can carry references) |
 | `429` | `signer_holding_limit` | `this signer already has <n> unconfirmed records held; wait for them to be confirmed` / `… <n> unconfirmed bytes held; …` | the holding area's per-signer bounds on records and bytes; retry once the earlier posts are accepted |
 | `507` | `holding_full` | `the host is holding its maximum of <n> unconfirmed bytes; retry once the message is accepted` / `… maximum of <n> unconfirmed records; …` | the holding area is full, in bytes or in records; retry with the `message_id` once the message is accepted and the record goes straight to the store |
+| `503` | `chain_read_unavailable` | `the chain provider is busy; try again shortly` | a recognized provider throttle or an active endpoint cooldown; numeric `Retry-After` gives the remaining wait, rounded up to seconds. Retry the same request after that wait. |
 | `502` | `chain_read_unavailable` | `could not verify anchoring; try again shortly` | the chain's RPC endpoint was unreachable or returned something unintelligible. **The host could not check**; nothing is implied about the post. Retry later. RPC details are logged server-side, not included in the response. |
 | `503` | `host_busy` | `the host is busy; try again shortly` | upload memory or slots, upstream concurrency or the configured RPC budget is exhausted. An upload is refused as soon as its pool's memory has no room for its next bytes, or once its bytes are in if no slot is free. Retry the same bytes/proof after backoff. |
 | `408` | `upload_too_slow` | `the upload arrived too slowly; send it again` | an upload small enough for the small pool did not arrive within ten seconds; its memory is released. Send the same bytes again. |
@@ -471,6 +493,7 @@ gets `304 Not Modified` only while the host still serves the record; a takedown 
 | `404` | `no_store` | `this host stores no content` | a gateway-only host (`store` is `null` in the status) |
 | `404` | `content_not_found` | `unknown content hash` | nothing stored under that hash and nothing pulled: never published to this host, not vouched for by the message named, no peer had it, or pulled but only held because the message is not accepted yet |
 | `410` | `taken_down` | `this host has taken this content down` | the host's admin has taken these exact bytes down ([takedowns](GATEWAY_API.md#takedowns)), under every post. Clients show it as removed by this host and do not retry. Another host may still serve it. |
+| `503` | `chain_read_unavailable` | `the chain provider is busy; try again shortly` | a recognized provider throttle or an active endpoint cooldown; numeric `Retry-After` gives the remaining wait, rounded up to seconds. Retry the same request after that wait. |
 | `502` | `chain_read_unavailable` | `could not verify anchoring; try again shortly` | the chain could not be asked whether the message named vouches for the hash; RPC details are logged server-side |
 | `503` | `host_busy` | `the host is busy; try again shortly` | upstream concurrency/rate admission or the distinct-peer-fetch pool is exhausted; retry after a short pause |
 | `503` | `index_unavailable` | `the chain index is unavailable; try again shortly` | peer-pull anchoring requires an index that is starting, backfilling or stopped; retry once ready |

@@ -19,6 +19,8 @@ pub enum Fetch {
     Transient(anyhow::Error),
     /// This host had no upstream slot free.
     Busy,
+    /// An endpoint-wide throttle: smaller ranges cannot bypass the pause.
+    Throttled(rpc::RpcError),
     /// The endpoint refused the query as posed, or its answer exceeded this
     /// host's bound. A narrower range may fare better.
     Refused,
@@ -51,6 +53,7 @@ pub async fn range_logs(
     {
         Ok(answer) => answer,
         Err(rpc::RpcError::Busy) => return Err(Fetch::Busy),
+        Err(error @ rpc::RpcError::RateLimited(_)) => return Err(Fetch::Throttled(error)),
         Err(error) if error.is_transient() => return Err(Fetch::Transient(error.into())),
         Err(_) => return Err(Fetch::Refused),
     };

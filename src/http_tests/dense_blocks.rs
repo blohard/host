@@ -278,3 +278,29 @@ fn refusals_of_a_block_count_until_it_is_taken_in() {
         },
     );
 }
+
+#[test]
+fn a_rate_throttle_does_not_narrow_ranges_or_try_receipts() {
+    with_server(
+        "rate-throttle",
+        Some(dense_node()),
+        setup,
+        |server| async move {
+            let Server { state, node, .. } = server;
+            let node = node.unwrap();
+            node.node.response_overrides.lock().unwrap().insert(
+                "eth_getLogs".into(),
+                json!({"error":{"code":-32005,"message":"rate limited"}}),
+            );
+            follow::once(&state).await;
+            assert_eq!(
+                node.node.count("eth_getLogs"),
+                1,
+                "no range retries on a rate throttle"
+            );
+            assert_eq!(node.node.count("eth_getBlockReceipts"), 0);
+            assert_eq!(committed(&state), 0);
+            assert!(!index_state(&state).is_stopped());
+        },
+    );
+}

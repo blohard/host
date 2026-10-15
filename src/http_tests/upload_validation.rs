@@ -49,8 +49,24 @@ fn transaction_rpc_errors_are_retryable() {
                     .unwrap()
                     .insert("eth_getTransactionByHash".into(), answer.clone());
                 let response = publish(&client, &base, &query, body.clone()).await;
-                assert_eq!(response.status(), 502, "{answer}");
+                assert_eq!(
+                    response.status(),
+                    if answer.get("error").is_some() {
+                        503
+                    } else {
+                        502
+                    },
+                    "{answer}"
+                );
                 assert_eq!(state.store.as_ref().unwrap().holding.stats(), (0, 0));
+                if answer.get("error").is_some() {
+                    state
+                        .verifier
+                        .chain(31337)
+                        .unwrap()
+                        .0
+                        .expire_cooldown(&node.url);
+                }
             }
             for (answer, status) in [
                 (json!({"result":null}), 404),
@@ -176,11 +192,36 @@ fn malformed_receipts_keep_held_uploads() {
                     2,
                     "receipt failure must retain body and attachment: {answer}"
                 );
+                let response = client
+                    .get(&receipt_url)
+                    .header("Origin", "https://example.org")
+                    .send()
+                    .await
+                    .unwrap();
+                if answer.get("error").is_some() {
+                    assert_eq!(response.headers()["retry-after"], "2");
+                    assert_eq!(
+                        response.headers()["access-control-expose-headers"],
+                        "retry-after"
+                    );
+                }
                 assert_eq!(
-                    client.get(&receipt_url).send().await.unwrap().status(),
-                    502,
+                    response.status(),
+                    if answer.get("error").is_some() {
+                        503
+                    } else {
+                        502
+                    },
                     "{answer}"
                 );
+                if answer.get("error").is_some() {
+                    state
+                        .verifier
+                        .chain(31337)
+                        .unwrap()
+                        .0
+                        .expire_cooldown(&node.url);
+                }
             }
             node.node.response_overrides.lock().unwrap().clear();
             crate::index::follow::once(&state).await;

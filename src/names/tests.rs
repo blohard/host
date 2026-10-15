@@ -218,7 +218,7 @@ async fn verified_ens_is_shared_and_cached_with_its_avatar() {
 /// found name's day, and marked so a browser keeps it no longer.
 #[tokio::test]
 async fn a_failed_avatar_read_shows_the_name_as_a_partial_answer_for_an_hour() {
-    let outage = json!({"error":{"code": -32005, "message":"rate limited"}});
+    let outage = json!({"error":{"code": -32603, "message":"provider unavailable"}});
     let address = crate::chain::Hex([0x11; 20]);
     let mock = Arc::new(Mock::default());
     mock.answers
@@ -272,7 +272,7 @@ async fn a_basename_behind_a_failed_ens_is_a_partial_answer_for_an_hour() {
     let address = crate::chain::Hex([0x11; 20]);
     let mock = Arc::new(Mock::default());
     mock.answers.lock().unwrap().extend([
-        json!({"error":{"code": -32005, "message":"rate limited"}}),
+        json!({"error":{"code": -32000, "message":"provider unavailable"}}),
         ok(nameCall::abi_encode_returns(&"alice.base.eth".to_string())),
         registry_entry(),
         forward_record(address.0),
@@ -1283,7 +1283,6 @@ async fn other_errors_still_pause_base() {
         at_resolver(broken("insufficient funds for gas")),
         at_resolver(json!({"error": {"code": -32000, "message": "EVM error: InvalidFEOpcode"}})),
         at_resolver(json!({"error": {"code": -32603, "message": "internal error"}})),
-        at_resolver(json!({"error": {"code": -32005, "message": "rate limited"}})),
         at_resolver(json!("neither a result nor an error")),
         vec![broken("EVM error: InvalidFEOpcode")],
     ];
@@ -1547,4 +1546,174 @@ async fn a_slow_offchain_server_makes_the_basename_shown_instead_partial() {
         task.abort();
         gateway_task.abort();
     }
+}
+
+#[tokio::test]
+async fn throttle_before_ens_does_not_cache_a_basename_or_pause_names() {
+    let address = crate::chain::Hex([0x11; 20]);
+    let ens = Arc::new(Mock::default());
+    ens.answers
+        .lock()
+        .unwrap()
+        .push_back(json!({"error":{"code":-32005,"message":"rate limited"}}));
+    let base = Arc::new(Mock::default());
+    base.answers.lock().unwrap().extend([
+        modern_name("alice.base.eth"),
+        registry_entry(),
+        forward_record(address.0),
+        ok(textCall::abi_encode_returns(&String::new())),
+    ]);
+    let (ens_url, ens_task) = endpoint(ens.clone()).await;
+    let (base_url, base_task) = endpoint(base.clone()).await;
+    let names = Arc::new(
+        Names::new(
+            NamesConfig {
+                ethereum_upstream: Some(ens_url),
+                base_upstream: Some(base_url),
+            },
+            rpc::Upstream::unlimited(reqwest::Client::new()),
+        )
+        .unwrap(),
+    );
+    assert!(names.lookup(address).await.is_err());
+    assert!(names.cached(address).is_none());
+    assert!(names.paused.lock().unwrap().is_empty());
+    assert!(
+        base.calls.lock().unwrap().is_empty(),
+        "do not cache a fallback for congestion"
+    );
+    names
+        .client
+        .expire_cooldown(names.ethereum.as_ref().unwrap());
+    ens.answers.lock().unwrap().extend([
+        primary("alice.eth"),
+        ok(resolveWithGatewaysCall::abi_encode_returns(
+            &resolveWithGatewaysReturn {
+                result: textCall::abi_encode_returns(&String::new()).into(),
+                resolver: Default::default(),
+            },
+        )),
+    ]);
+    assert_eq!(
+        names.lookup(address).await.unwrap().name.as_deref(),
+        Some("alice.eth")
+    );
+    ens_task.abort();
+    base_task.abort();
+}
+
+#[tokio::test]
+async fn throttle_or_busy_on_an_avatar_does_not_cache_a_partial_name() {
+    let address = crate::chain::Hex([0x11; 20]);
+    for base in [false, true] {
+        for busy in [false, true] {
+            let mock = Arc::new(Mock::default());
+            let records = if base {
+                vec![
+                    modern_name("alice.base.eth"),
+                    registry_entry(),
+                    forward_record(address.0),
+                ]
+            } else {
+                vec![primary("alice.eth")]
+            };
+            let client = if busy {
+                // Names may spend half the bucket: exactly enough to reach the avatar.
+                rpc::Upstream::new(
+                    reqwest::Client::new(),
+                    rpc::Budget::new(records.len() as u32 * 2, 0),
+                )
+            } else {
+                rpc::Upstream::unlimited(reqwest::Client::new())
+            };
+            mock.answers.lock().unwrap().extend(records.clone());
+            if !busy {
+                mock.answers
+                    .lock()
+                    .unwrap()
+                    .push_back(json!({"error":{"code":-32005,"message":"rate limited"}}));
+            }
+            let (url, task) = endpoint(mock.clone()).await;
+            let mut names = paused_service(url, base);
+            names.client = client;
+            let names = Arc::new(names);
+            assert!(
+                names.lookup(address).await.is_err(),
+                "base={base}, busy={busy}"
+            );
+            assert!(names.cached(address).is_none());
+            assert!(names.paused.lock().unwrap().is_empty());
+            if !busy {
+                names.client.expire_cooldown(if base {
+                    names.base.as_ref().unwrap()
+                } else {
+                    names.ethereum.as_ref().unwrap()
+                });
+                let avatar =
+                    textCall::abi_encode_returns(&"https://example.org/avatar.png".to_string());
+                let answer = if base {
+                    ok(avatar)
+                } else {
+                    ok(resolveWithGatewaysCall::abi_encode_returns(
+                        &resolveWithGatewaysReturn {
+                            result: avatar.into(),
+                            resolver: Default::default(),
+                        },
+                    ))
+                };
+                mock.answers.lock().unwrap().extend(records);
+                mock.answers.lock().unwrap().push_back(answer);
+                let found = names.lookup(address).await.unwrap();
+                assert_eq!(
+                    found.avatar.as_deref(),
+                    Some("https://example.org/avatar.png")
+                );
+                assert!(!found.partial);
+            }
+            task.abort();
+        }
+    }
+}
+
+#[tokio::test]
+async fn busy_before_ens_does_not_fall_back_to_a_basename() {
+    let mock = Arc::new(Mock::default());
+    let (url, task) = endpoint(mock.clone()).await;
+    let budget = rpc::Budget::new(1, 0);
+    budget.take(rpc::Class::Client).await.unwrap();
+    let names = Arc::new(
+        Names::new(
+            NamesConfig {
+                ethereum_upstream: Some(url.clone()),
+                base_upstream: Some(url),
+            },
+            rpc::Upstream::new(reqwest::Client::new(), budget),
+        )
+        .unwrap(),
+    );
+    let address = crate::chain::Hex([0x11; 20]);
+    assert!(names.lookup(address).await.is_err());
+    assert!(names.cached(address).is_none());
+    assert!(names.paused.lock().unwrap().is_empty());
+    assert!(mock.calls.lock().unwrap().is_empty());
+    task.abort();
+}
+
+#[tokio::test]
+async fn throttle_recipient_recovers_without_a_name_pause_or_negative_cache() {
+    let mock = Arc::new(Mock::default());
+    mock.answers.lock().unwrap().extend([
+        json!({"error":{"code":-32005,"message":"project ID request rate exceeded"}}),
+        resolved(alloy_primitives::Address::from([0x22; 20])),
+    ]);
+    let (url, task) = endpoint(mock.clone()).await;
+    let names = Arc::new(paused_service(url.clone(), false));
+    assert!(names.lookup_name("alice.eth".into(), None).await.is_err());
+    assert!(names.paused.lock().unwrap().is_empty());
+    assert!(names.forward_cache.get(&"alice.eth".to_string()).is_none());
+    names.client.expire_cooldown(&url);
+    assert!(
+        json!(names.lookup_name("alice.eth".into(), None).await.unwrap())["address"].is_string()
+    );
+    task.abort();
 }

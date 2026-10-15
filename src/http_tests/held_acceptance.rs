@@ -82,7 +82,7 @@ fn a_held_body_is_read_again_only_when_the_accepted_head_moves() {
             // waits six seconds before it is asked about again.
             node.node.set_head(18);
             *node.node.simulation_error.lock().unwrap() =
-                Some(json!({"code": -32005, "message": "rate limited"}));
+                Some(json!({"code": -32000, "message": "provider unavailable"}));
             assert_eq!(promote_at(&state, start + Duration::from_secs(15)).await, 0);
             assert_eq!(calls(), before + 6, "the read was attempted and failed");
             *node.node.simulation_error.lock().unwrap() = None;
@@ -142,7 +142,7 @@ fn a_failed_lookup_waits_from_its_own_completion_not_from_the_pass_start() {
                 .latency_ms
                 .store(500, std::sync::atomic::Ordering::Relaxed);
             *node.node.simulation_error.lock().unwrap() =
-                Some(json!({"code": -32005, "message": "rate limited"}));
+                Some(json!({"code": -32000, "message": "provider unavailable"}));
             let start = Instant::now();
             let before = calls();
             assert_eq!(promote_at(&state, start).await, 0);

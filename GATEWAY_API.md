@@ -133,7 +133,7 @@ The follower also stops a chain, naming the block in its log, in these cases:
   exceed the 128 MiB limit on a receipts answer. The follower halves a range before falling back to
   a single block's receipts, and never indexes part of a block.
 - An endpoint without `eth_getBlockReceipts` refuses a block as logs on the sixteenth consecutive
-  poll. The block is retried for several minutes first, since the refusal may be a rate limit.
+  poll. The block is retried for several minutes first, since an ambiguous refusal may be temporary; explicit throttles pause the endpoint without trying receipts.
 - The provider keeps returning a range the index cannot accept as valid history: a log whose block
   or hash does not match its header, an event that does not decode, a post out of sequence, or a
   registry event that disagrees with history. Such a range is retried at first, since a
@@ -770,7 +770,9 @@ arbitrary contract call data.
 Admission follows the Board's rules, which call gates with STATICCALL, and its simulation is capped
 at 500,000 gas. A known revert answers 422 `simulation_refused`, with the `revert` bytes, bounded in
 size. An estimate over the cap answers 422 `post_exceeds_gas_limit`. An upstream that can't be
-reached answers 502 `chain_read_unavailable`. Admission, estimates **and receipt reads** can answer
+reached answers 502 `chain_read_unavailable`. A recognized rate throttle instead answers 503
+`chain_read_unavailable` with a numeric `Retry-After`, including when the throttle occurs during
+the receipt's header check. Admission, estimates **and receipt reads** can answer
 503 `host_busy` when the upstream concurrency limit or the shared RPC budget is used up. For
 example:
 
@@ -915,6 +917,10 @@ private upstream URLs.
 With no name service configured, or no verified name, the fields are null; a failed lookup returns
 503. A found name is cached for a day, and a negative or partial answer for an hour. Errors are not
 cached, but an upstream that fails is paused for 30 seconds rather than asked again on every lookup.
+Capacity limits are an exception: a local budget/slot refusal or a recognized RPC throttle answers
+503 without caching a missing or partial name, even when a Basename could replace ENS or only the
+avatar read failed. A throttle uses the RPC transport's endpoint cooldown and adds no separate
+30-second name pause.
 A record the host cannot read or verify is that address's answer: null fields, cached as a negative,
 with no pause. That covers a name that is not a DNS name, not normalized or not under base.eth, a
 record that doesn't decode or is too large, and a resolver that refuses, runs out of gas or keeps

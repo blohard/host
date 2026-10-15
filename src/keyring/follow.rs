@@ -190,7 +190,12 @@ impl Keyring {
                         break;
                     }
                     // Smaller log ranges accommodate provider response limits.
-                    span = (span / 2).max(1);
+                    if !matches!(
+                        error.downcast_ref::<rpc::RpcError>(),
+                        Some(rpc::RpcError::RateLimited(_))
+                    ) {
+                        span = (span / 2).max(1);
+                    }
                     tracing::warn!("keyring catch-up retry: {error:#}");
                     tokio::time::sleep(Duration::from_secs(10)).await;
                 }
@@ -365,6 +370,7 @@ impl Keyring {
             {
                 Ok(logs) => return Ok((logs, boundary)),
                 Err(Fetch::Busy) => anyhow::bail!("no upstream slot free"),
+                Err(Fetch::Throttled(error)) => return Err(error.into()),
                 Err(Fetch::Transient(error)) if through == from => return Err(error),
                 Err(Fetch::Refused) if through == from => {
                     let logs = self

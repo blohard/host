@@ -37,11 +37,11 @@ fn contract_wallet_provider_failures_are_retryable_without_holding_bytes() {
             let node = node.unwrap();
             let outage = json!({"error": {"code": -32005, "message": "rate limited"}});
             let cases = [
-                ("eth_getCode", outage.clone(), 502),
+                ("eth_getCode", outage.clone(), 503),
                 ("eth_getCode", json!({"result": null}), 502),
                 ("eth_getCode", json!({"result": "0xzz"}), 502),
                 ("eth_getCode", json!({"result": "0x"}), 403),
-                ("eth_call", outage, 502),
+                ("eth_call", outage, 503),
                 ("eth_call", json!({}), 502),
                 ("eth_call", json!({"result": "0xzz"}), 502),
                 (
@@ -62,6 +62,15 @@ fn contract_wallet_provider_failures_are_retryable_without_holding_bytes() {
                 let response = publish(&client, &base, &query, body.clone()).await;
                 assert_eq!(response.status().as_u16(), expected, "{method}: {answer}");
                 assert_eq!(state.store.as_ref().unwrap().holding.stats(), (0, 0));
+                if answer.get("error").is_some_and(|e| e["code"] == -32005) {
+                    assert_eq!(response.headers()["retry-after"], "2");
+                    state
+                        .verifier
+                        .chain(31337)
+                        .unwrap()
+                        .0
+                        .expire_cooldown(&node.url);
+                }
                 node.node.response_overrides.lock().unwrap().clear();
             }
             assert_eq!(

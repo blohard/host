@@ -59,6 +59,11 @@ reserved_for_ingestion = 300
 [[chains]]
 id = 810337
 name = "anvil"
+# Optional native gas token metadata for wallet setup. Defaults to Ether/ETH/18.
+# All three fields are required when supplied. Name: 1-64 printable ASCII
+# characters without surrounding spaces; symbol: 1-16 without spaces;
+# decimals: an integer from 0 to 255. This does not configure AccountKeys pricing.
+# native_currency = { name = "COIN", symbol = "COIN", decimals = 18 }
 # The private endpoint. It must answer eth_getBlockReceipts and eth_getLogs.
 rpc_url = "http://127.0.0.1:8545"
 # The Board has the same address on every chain, because it is deployed

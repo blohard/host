@@ -41,6 +41,7 @@ pub async fn status(State(state): State<Arc<AppState>>) -> Response {
                 "name": c.name,
                 "contract": hex0x(&c.contract),
                 "public_rpc_url": c.public_rpc_url,
+                "native_currency": c.native_currency,
                 "start_block": c.start_block,
                 "confirmations": c.confirmations,
                 "index": state.gateway.as_ref().and_then(|g| g.indexes.get(&id).map(|index| {

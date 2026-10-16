@@ -160,6 +160,7 @@ Each chain reports:
 |---|---|
 | `id`, `name`, `contract` | Chain id, optional label and canonical Board address. |
 | `public_rpc_url` | Optional wallet endpoint, absolute or relative to this host; never the private verifying URL. |
+| `native_currency` | Native gas token metadata for wallets: `name`, `symbol`, and integer `decimals`. Defaults to Ether/ETH/18 when not configured. Older hosts omit it. |
 | `start_block`, `confirmations` | The Board's deployment block, and how many confirmations a block needs before it is accepted. |
 
 The other chain fields describe the chain's index, which is null without a gateway, and the

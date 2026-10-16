@@ -46,6 +46,7 @@ pub struct Chain {
     pub contract: [u8; 20],
     /// Browser-safe RPC URL, if the operator chose to publish one.
     pub public_rpc_url: Option<String>,
+    pub native_currency: crate::config::NativeCurrency,
     /// Block the board was deployed in.
     pub start_block: u64,
     pub index_start_block: u64,
@@ -240,6 +241,7 @@ impl Verifier {
                 url: c.rpc_url.clone(),
                 contract: parse_address(&c.contract)?,
                 public_rpc_url: c.public_rpc_url.clone(),
+                native_currency: c.native_currency.clone(),
                 start_block: c.start_block,
                 index_start_block,
                 confirmations: c.confirmations,

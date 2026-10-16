@@ -169,6 +169,11 @@ Besides the identity fields in [STORE_API.md](STORE_API.md#status), each chain r
 (link previews never fetch from them). Readiness can be false during startup or a discovery outage
 without turning the feature off or changing the status code, and cached previews stay available.
 
+Each chain publishes `native_currency` (`name`, `symbol`, `decimals`) for wallet network
+registration. Operators configure it under `[[chains]]`; omitting it defaults to Ether/ETH/18.
+Clients talking to older hosts that omit this field may use the same default. This metadata
+describes the native gas token, not AccountKeys pricing.
+
 Example response (a host serving both roles):
 
 ```json
@@ -178,6 +183,7 @@ Example response (a host serving both roles):
     {
       "id": 31337, "name": "example", "contract": "0x3333333333333333333333333333333333333333",
       "public_rpc_url": null, "start_block": 10, "confirmations": 2,
+      "native_currency": {"name": "Ether", "symbol": "ETH", "decimals": 18},
       "index": {
         "at": {
           "generation": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",

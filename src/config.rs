@@ -13,8 +13,46 @@
 //! know, per chain, which contract to ask and through which endpoint.
 
 use anyhow::{Context as _, Result, anyhow, ensure};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, path::Path};
+
+/// Wallet metadata for the chain's native gas token, independent of AccountKeys pricing.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeCurrency {
+    pub name: String,
+    pub symbol: String,
+    pub decimals: u8,
+}
+
+impl Default for NativeCurrency {
+    fn default() -> Self {
+        Self {
+            name: "Ether".into(),
+            symbol: "ETH".into(),
+            decimals: 18,
+        }
+    }
+}
+
+impl NativeCurrency {
+    fn validate(&self) -> Result<()> {
+        ensure!(
+            !self.name.is_empty()
+                && self.name.len() <= 64
+                && self.name.trim() == self.name
+                && self.name.bytes().all(|b| b.is_ascii_graphic() || b == b' '),
+            "native_currency.name must be 1-64 printable ASCII characters without surrounding spaces"
+        );
+        ensure!(
+            !self.symbol.is_empty()
+                && self.symbol.len() <= 16
+                && self.symbol.bytes().all(|b| b.is_ascii_graphic()),
+            "native_currency.symbol must be 1-16 printable ASCII characters without spaces"
+        );
+        Ok(())
+    }
+}
 
 /// The config file (TOML). See `config.example.toml`.
 #[derive(Debug, Deserialize)]
@@ -193,6 +231,9 @@ pub struct ChainConfig {
     /// published by `/api/status` so the web app can add the chain to a wallet
     /// for signing and submission. Leave unset to publish nothing.
     pub public_rpc_url: Option<String>,
+    /// Native gas token advertised to wallets. Defaults to Ether/ETH/18.
+    #[serde(default)]
+    pub native_currency: NativeCurrency,
     /// Block at which the core contract was deployed. Ingestion starts no
     /// later than this block.
     #[serde(default)]
@@ -370,6 +411,7 @@ impl Config {
 impl ChainConfig {
     /// The rules for one chain's section, beside those that compare chains.
     fn validate(&self) -> Result<()> {
+        self.native_currency.validate()?;
         crate::abi::parse_address(&self.contract).context("bad contract address")?;
         if let Some(start) = self.index_start_block {
             ensure!(
@@ -473,6 +515,7 @@ impl ChainConfig {
             rpc_url: url.to_string(),
             contract: contract.to_string(),
             public_rpc_url: None,
+            native_currency: NativeCurrency::default(),
             start_block: 0,
             index_start_block: None,
             confirmations: 0,
@@ -680,6 +723,67 @@ mod tests {
     }
 
     #[test]
+    fn native_currency_can_be_configured() {
+        let cfg = Config::parse(
+            r#"
+            [[chains]]
+            id = 424242
+            rpc_url = "http://a"
+            contract = "0x0000000000000000000000000000000000000001"
+            native_currency = { name = "COIN", symbol = "COIN", decimals = 18 }
+            [gateway]
+            "#,
+        );
+        let cfg = cfg.unwrap();
+        assert_eq!(cfg.chains[0].native_currency.name, "COIN");
+        assert_eq!(cfg.chains[0].native_currency.symbol, "COIN");
+        assert_eq!(cfg.chains[0].native_currency.decimals, 18);
+    }
+
+    #[test]
+    fn native_currency_rejects_invalid_wallet_metadata() {
+        let chain = r#"
+            [[chains]]
+            id = 424242
+            rpc_url = "http://a"
+            contract = "0x0000000000000000000000000000000000000001"
+        "#;
+        for currency in [
+            r#"{ name = "", symbol = "COIN", decimals = 18 }"#.to_string(),
+            r#"{ name = " COIN", symbol = "COIN", decimals = 18 }"#.into(),
+            r#"{ name = "COIN", symbol = "C OIN", decimals = 18 }"#.into(),
+            r#"{ name = "COIN", symbol = "", decimals = 18 }"#.into(),
+            r#"{ name = "COIN", symbol = "COIN", decimals = -1 }"#.into(),
+            r#"{ name = "COIN", symbol = "COIN", decimals = 256 }"#.into(),
+            r#"{ name = "COIN", symbol = "COIN", decimals = 1.5 }"#.into(),
+            r#"{ name = "COIN", symbol = "COIN" }"#.into(),
+            r#"{ name = "COIN", symbol = "COIN", decimals = 18, typo = true }"#.into(),
+            r#"{ name = "COIN\ncoin", symbol = "COIN", decimals = 18 }"#.into(),
+            format!(
+                r#"{{ name = "{}", symbol = "COIN", decimals = 18 }}"#,
+                "x".repeat(65)
+            ),
+            format!(
+                r#"{{ name = "COIN", symbol = "{}", decimals = 18 }}"#,
+                "x".repeat(17)
+            ),
+        ] {
+            assert!(
+                Config::parse(&format!("{chain}\nnative_currency = {currency}\n[gateway]"))
+                    .is_err(),
+                "{currency}"
+            );
+        }
+        for decimals in [0, 6, 18, 255] {
+            let currency =
+                format!(r#"{{ name = "Example coin", symbol = "COIN", decimals = {decimals} }}"#);
+            let cfg = Config::parse(&format!("{chain}\nnative_currency = {currency}\n[gateway]"))
+                .unwrap();
+            assert_eq!(cfg.chains[0].native_currency.decimals, decimals);
+        }
+    }
+
+    #[test]
     fn published_fields_are_optional() {
         let cfg = Config::parse(
             r#"
@@ -692,6 +796,9 @@ mod tests {
         )
         .unwrap();
         assert!(cfg.chains[0].public_rpc_url.is_none());
+        assert_eq!(cfg.chains[0].native_currency.name, "Ether");
+        assert_eq!(cfg.chains[0].native_currency.symbol, "ETH");
+        assert_eq!(cfg.chains[0].native_currency.decimals, 18);
         assert_eq!(cfg.chains[0].start_block, 0);
         let err = Config::parse(
             r#"

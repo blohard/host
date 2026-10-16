@@ -475,6 +475,11 @@ fn http_requires_anchoring_in_chains_mode() {
                 ChainConfig {
                     name: Some("anvil".into()),
                     public_rpc_url: Some("http://rpc.example:8545".into()),
+                    native_currency: crate::config::NativeCurrency {
+                        name: "Example coin".into(),
+                        symbol: "COIN".into(),
+                        decimals: 6,
+                    },
                     start_block: 7,
                     ..ChainConfig::for_test(31337, "", CONTRACT)
                 },
@@ -509,6 +514,10 @@ fn http_requires_anchoring_in_chains_mode() {
             assert_eq!(
                 status["chains"][0]["public_rpc_url"],
                 "http://rpc.example:8545"
+            );
+            assert_eq!(
+                status["chains"][0]["native_currency"],
+                json!({"name": "Example coin", "symbol": "COIN", "decimals": 6})
             );
             assert_eq!(status["chains"][0]["start_block"], 7);
             assert_eq!(status["chains"][0]["confirmations"], 0);

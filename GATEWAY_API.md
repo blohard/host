@@ -157,7 +157,7 @@ Besides the identity fields in [STORE_API.md](STORE_API.md#status), each chain r
 | Field | Meaning |
 |---|---|
 | `index` | Null without a gateway; otherwise `{at, state, accepted_head, messages, pending_bodies, pending_quotes}`. State is `starting` (the chain has not yet answered the follower's identity check), `backfilling`, `ready` or `stopped`. `accepted_head` is the most recently sampled head minus confirmations, as a decimal string or null before a successful poll. Compare it with `at.checkpoint.block` for ingestion lag; a ready index can still lag after becoming ready. `pending_quotes` counts unresolved quotes whose target chain this host serves; a quote of another chain waits unseen and resolves if that chain is configured later. |
-| `curated` | Whether this host has local curated and blocked lists. Their contents are in the top-level `host_policy`. |
+| `curated` | Whether the host offers its curated feed and badges on this chain. Requires local policy and defaults to enabled; `chains.curated = false` disables it for a chain. Shared lists and blocking remain in the top-level `host_policy`. |
 | `blocklist` | Optional `{registry, list}` naming each author’s display blocklist. Published directly from configuration, independently of gate validation. Use it for reply folding and notification filters. It does not identify a gate contract. |
 | `blocking` | Optional verified `{gate, registry, list}` for the shared author-blocklist gate; `list` is its name. |
 | `closed_gate` | Optional verified `ClosedReplyGate` address. Denies ordinary direct replies; the Board admits protected responses without calling it. Does not retract posts or add a historical display fold. No Board or market binding is needed for this stateless gate. |
@@ -1082,6 +1082,34 @@ preview build slots. Answers keep `Cache-Control: no-store` for outside caches.
 
 ## Account keyring
 
+### Public purchases and transfers
+
+`GET /api/chains/{chain}/keyring/activity?limit=20` returns all accepted key purchases
+(including buying one's own keys) and transfers, newest first. Sales and activations without
+purchases are excluded. This is a local index read with no RPC calls:
+
+```text
+{ market, checkpoint: { block, hash }, items, next }
+```
+
+Each item has `position: { block, log }`, `transaction`, `timestamp` and `event`. Blocks are
+decimal strings, log indexes and amounts are u32 numbers, and timestamps are Unix seconds.
+A purchase's event is `{ kind: "trade", creator, holder, buy: true, amount, supply }`;
+a transfer's is `{ kind: "transfer", creator, from, to, amount }`.
+
+The limit is 1–100 (default 20). Pass both `before_block` and `before_log` from `next` to
+continue; the cursor is exclusive. Invalid queries return 400 `invalid_trade_query`.
+`next: null` means the history is exhausted. Each request examines at most 2,000 events,
+so a page can be empty and still have a continuation. Events involving any host-blocked
+participant are omitted; clients apply their own mutes. No history is trimmed from this
+public activity index. The existing keyring readiness rules apply: unavailable indexes return
+503 `keyring_syncing`, and unconfigured chains return 404 `keyring_not_configured`.
+
+The web app interleaves these events with conversations in Everyone on that chain, using
+block and log position. Purchases and transfers link to the creator's keys page. Other
+streams stay unchanged. Quiet polls cue Refresh without inserting rows while the reader
+is scrolling. A failed key read leaves posts usable and offers a retry.
+
 ### Creator trade notifications
 
 `GET /api/chains/{chain}/keyring/{account}/trades?limit=20` returns the account's key inbox as
@@ -1300,12 +1328,16 @@ DEX Screener pair links (`dexscreener.com/<chain>/<pair>`, also `www.dexscreener
 use its public pair API instead of fetching the webpage. The response must match the requested
 chain and pair. Cards show the token name and symbol, trading pair and exchange, and prefer the
 banner over the icon. Prices and market figures are omitted because previews are cached. The
-original link remains the card's destination. Other URLs still use HTML metadata.
+original link remains the card's destination. Other URLs still use HTML metadata. Successful
+published cards use the normal one-day preview lifetime, rather than the API response's cache
+headers, so token names and banners can lag changes by up to a day.
 
 API requests use the same outbound address checks, shared slots and ten-second deadline, with the
 two-destination-slot limit applied to `api.dexscreener.com`. Responses must be JSON and fit within
 64 KiB after decompression; redirects are refused. Image addresses pass the normal HTTPS and
-operator-address checks. API throttles and server errors retain the normal retry cooldown.
+operator-address checks. The slots limit concurrency, not requests per minute: traffic across
+many distinct pairs can still hit the provider's rate limit. API throttles and server errors
+retain the normal retry cooldown for the requested URL, not the API host as a whole.
 
 ### Limits and caching
 

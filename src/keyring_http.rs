@@ -148,3 +148,29 @@ pub async fn lookup(
     };
     index.lookup(holder).map(json_ok).unwrap_or_else(syncing)
 }
+
+/// Public market activity is served from the accepted index, never from RPC.
+pub async fn activity(
+    State(state): State<Arc<AppState>>,
+    JsonPath(chain): JsonPath<u64>,
+    JsonQuery(query): JsonQuery<TradesQuery>,
+) -> Response {
+    if !(1..=100).contains(&query.limit)
+        || query.before_block.is_some() != query.before_log.is_some()
+    {
+        return json_error(StatusCode::BAD_REQUEST, "invalid_trade_query");
+    }
+    let Some(index) = state.keyrings.get(&chain) else {
+        return json_error(StatusCode::NOT_FOUND, "keyring_not_configured");
+    };
+    let before = query
+        .before_block
+        .zip(query.before_log)
+        .map(|(block, log)| Position { block, log });
+    index
+        .activity(before, query.limit, |address| {
+            state.policy.blocked(&address.0)
+        })
+        .map(json_ok)
+        .unwrap_or_else(syncing)
+}

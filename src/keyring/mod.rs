@@ -250,6 +250,34 @@ impl Keyring {
         })
     }
 
+    /// Public purchases and transfers, newest first. A cursor seeks directly;
+    /// filtering scans at most 2,000 events, including hidden accounts.
+    pub fn activity(
+        &self,
+        before: Option<Position>,
+        limit: usize,
+        blocked: impl Fn(&Address) -> bool,
+    ) -> Option<Value> {
+        self.read_ready(|model| {
+            let events = &model.public_activity;
+            let end = before.map_or(events.len(), |p| events.partition_point(|e| e.position < p));
+            let mut at = end;
+            let mut items = Vec::new();
+            while at > 0 && end - at < 2_000 && items.len() < limit {
+                at -= 1;
+                let e = &events[at];
+                let hidden = match &e.event {
+                    model::Event::Trade(t) => blocked(&t.creator) || blocked(&t.holder),
+                    model::Event::Transfer(t) => blocked(&t.creator) || blocked(&t.from) || blocked(&t.to),
+                    model::Event::Activated { .. } => true,
+                };
+                if !hidden { items.push(e); }
+            }
+            let next = (at > 0 && at < end).then(|| events[at].position);
+            json!({"market":self.config.market,"checkpoint":model.checkpoint,"items":items,"next":next})
+        })
+    }
+
     /// An account's holders and holdings, each capped at 256 and marked when cut.
     pub fn lookup(&self, holder: Address) -> Option<Value> {
         self.read_ready(|model| {

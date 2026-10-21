@@ -509,3 +509,68 @@ fn accounts_declare_themselves_bots_beside_the_admin_bot_list() {
         },
     );
 }
+
+#[test]
+fn curated_visibility_is_per_chain_and_requires_host_policy() {
+    for enabled in [false, true] {
+        for (id, curated) in [(8453, true), (424242, false)] {
+            let path = std::env::temp_dir().join(format!(
+                "host-curated-{}-{enabled}-{id}.json",
+                std::process::id()
+            ));
+            std::fs::write(
+                &path,
+                br#"{"revision":0,"curated":[],"blocked":[],"bots":[]}"#,
+            )
+            .unwrap();
+            write_no_takedowns(&path);
+            let policy = enabled.then(|| crate::host_policy::Config {
+                file: path.clone(),
+                admin: crate::chain::Hex([1; 20]),
+                admin_chain: id,
+                origin: "https://host.example".into(),
+            });
+            with_server(
+                "curated-per-chain",
+                Some(Node::new(id, CONTRACT, Vec::new())),
+                move |url| {
+                    // Existing entries default to enabled; a chain may opt out.
+                    let setting = if curated { "" } else { "curated = false" };
+                    let url = url.unwrap();
+                    let cfg = Config::parse(&format!(
+                        r#"
+                        [store]
+                        [[chains]]
+                        id = {id}
+                        rpc_url = "{url}"
+                        contract = "{CONTRACT}"
+                        {setting}
+                    "#
+                    ))
+                    .unwrap();
+                    assert_eq!(cfg.chains[0].curated, curated);
+                    Setup {
+                        verifier: Verifier::from_config(&cfg, reqwest::Client::new()).unwrap(),
+                        host_policy: policy,
+                        ..Setup::default()
+                    }
+                },
+                move |Server { base, client, .. }| async move {
+                    let status: Value = client
+                        .get(format!("{base}/api/status"))
+                        .send()
+                        .await
+                        .unwrap()
+                        .json()
+                        .await
+                        .unwrap();
+                    assert_eq!(status["chains"][0]["id"], id);
+                    assert_eq!(status["chains"][0]["curated"], enabled && curated);
+                    assert_eq!(status["host_policy"].is_object(), enabled);
+                },
+            );
+            let _ = std::fs::remove_file(&path);
+            let _ = std::fs::remove_file(crate::host_policy::takedowns::path(&path));
+        }
+    }
+}

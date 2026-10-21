@@ -199,6 +199,11 @@ pub fn router(state: Arc<AppState>, web_dir: Option<PathBuf>) -> Router {
     let visitor_limits = Arc::new(crate::visitor::Limits::default());
     let domain = ApiRoutes::new(state.clone(), visitor_limits.clone())
         .route(
+            "/api/chains/{chain_id}/keyring/activity",
+            get(crate::keyring_http::activity),
+            Admission::Free,
+        )
+        .route(
             "/api/chains/{chain_id}/keyring/{holder}",
             get(crate::keyring_http::lookup),
             Admission::Free,

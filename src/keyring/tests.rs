@@ -1919,3 +1919,109 @@ fn keyring_rate_throttle_does_not_try_smaller_ranges_or_receipts() {
         running.stop().await;
     });
 }
+
+#[test]
+fn public_activity_keeps_purchases_and_transfers_including_own_keys() {
+    let other = Hex([2; 20]);
+    let mut m = Model::default();
+    let r = range(
+        10,
+        10,
+        vec![
+            at(10, 0, activated()),
+            at(10, 1, trade(CREATOR, true, 3, 3)),
+            at(10, 2, transfer(CREATOR, other, 2)),
+            at(10, 3, trade(other, false, 1, 2)),
+        ],
+    );
+    m.check(&config(), &r).unwrap();
+    m.apply(r);
+    assert_eq!(m.public_activity.len(), 2);
+    let k = Keyring::detached_with(config(), m, KeyState::Ready);
+    let p = k.activity(None, 1, |_| false).unwrap();
+    assert_eq!(p["items"][0]["event"]["kind"], "transfer");
+    assert_eq!(p["next"], json!({"block":"10","log":2}));
+    let next = k
+        .activity(Some(Position { block: 10, log: 2 }), 1, |_| false)
+        .unwrap();
+    assert_eq!(next["items"][0]["event"]["holder"], json!(CREATOR));
+    assert!(next["next"].is_null());
+    let blocked = k.activity(None, 20, |a| *a == other).unwrap();
+    assert_eq!(blocked["items"].as_array().unwrap().len(), 1);
+    assert!(
+        k.activity(None, 20, |a| *a == CREATOR).unwrap()["items"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    k.set_ready(false);
+    assert!(k.activity(None, 20, |_| false).is_none());
+}
+
+#[test]
+fn public_activity_filtered_pages_advance_without_scanning_all_history() {
+    let mut m = blank();
+    for n in 0..2_005 {
+        m.public_activity
+            .push(at(10, n, trade(CREATOR, true, 1, 1)));
+    }
+    let k = Keyring::detached_with(config(), m, KeyState::Ready);
+    let p = k.activity(None, 20, |_| true).unwrap();
+    assert!(p["items"].as_array().unwrap().is_empty());
+    assert_eq!(p["next"], json!({"block":"10","log":5}));
+    let next = k
+        .activity(Some(Position { block: 10, log: 5 }), 20, |_| false)
+        .unwrap();
+    assert_eq!(next["items"].as_array().unwrap().len(), 5);
+    assert_eq!(next["items"][0]["position"]["log"], 4);
+    assert!(next["next"].is_null());
+}
+
+#[tokio::test]
+async fn public_activity_route_checks_queries_and_never_reads_rpc() {
+    let mut m = Model::default();
+    for r in seeded() {
+        m.check(&config(), &r).unwrap();
+        m.apply(r);
+    }
+    let cfg = HostConfig::for_test(vec![ChainConfig::for_test(
+        84532,
+        "http://127.0.0.1:9",
+        MARKET,
+    )]);
+    let state = Arc::new(AppState {
+        gate_checks: Default::default(),
+        keyrings: [(84532, Keyring::detached_with(config(), m, KeyState::Ready))].into(),
+        verifier: Verifier::from_config(&cfg, reqwest::Client::new()).unwrap(),
+        notice: None,
+        policy: Default::default(),
+        store: None,
+        gateway: None,
+    });
+    for (chain, block, log, limit, expected) in [
+        (84532, None, None, 20, StatusCode::OK),
+        (8453, None, None, 20, StatusCode::NOT_FOUND),
+        (84532, Some(10), None, 20, StatusCode::BAD_REQUEST),
+        (84532, None, None, 101, StatusCode::BAD_REQUEST),
+        (84532, None, None, 0, StatusCode::BAD_REQUEST),
+    ] {
+        let response = crate::keyring_http::activity(
+            State(state.clone()),
+            JsonPath(chain),
+            JsonQuery(TradesQuery {
+                before_block: block,
+                before_log: log,
+                limit,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), expected);
+        if expected == StatusCode::OK {
+            let bytes = axum::body::to_bytes(response.into_body(), 100_000)
+                .await
+                .unwrap();
+            let p: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(p["items"].as_array().unwrap().len(), 2);
+        }
+    }
+}

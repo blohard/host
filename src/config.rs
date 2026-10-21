@@ -234,6 +234,9 @@ pub struct ChainConfig {
     /// Native gas token advertised to wallets. Defaults to Ether/ETH/18.
     #[serde(default)]
     pub native_currency: NativeCurrency,
+    /// Offer the host's curated feed and badges on this chain. Requires host_policy.
+    #[serde(default = "default_curated")]
+    pub curated: bool,
     /// Block at which the core contract was deployed. Ingestion starts no
     /// later than this block.
     #[serde(default)]
@@ -259,6 +262,10 @@ pub struct ChainConfig {
     pub key_gates: Option<KeyGatesConfig>,
     /// Optional deny-all gate, verified before offering reversible thread closing.
     pub closed_gate: Option<String>,
+}
+
+fn default_curated() -> bool {
+    true
 }
 
 /// Known key gates bound to this Board. The combined gate must use the
@@ -516,6 +523,7 @@ impl ChainConfig {
             contract: contract.to_string(),
             public_rpc_url: None,
             native_currency: NativeCurrency::default(),
+            curated: true,
             start_block: 0,
             index_start_block: None,
             confirmations: 0,

@@ -57,6 +57,9 @@ reserved_for_ingestion = 300
 # Avoid 31337: wallets already know a localhost network by that id, and it is
 # also a registered public testnet.
 [[chains]]
+# Hide the curated feed and badges on this chain with false (default: true).
+# This does not disable blocking, change the shared lists, or configure sponsorship.
+curated = true
 id = 810337
 name = "anvil"
 # Optional native gas token metadata for wallet setup. Defaults to Ether/ETH/18.

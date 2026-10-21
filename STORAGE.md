@@ -360,6 +360,10 @@ polling, then journals the in-memory checkpoint. The writer takes commands in or
 always comes after any range a poll already submitted. A crash loses at most 300 blocks of empty
 progress, which the follower reads again; ranges with events are never lost.
 
+The public activity feed also keeps every accepted purchase and transfer in chain order in
+memory, including self-purchases. Its memory use grows with that history. Replay rebuilds
+it from the existing range journal; this adds no journal fields or format change.
+
 In memory the keyring holds the activated markets and their supplies, positive balances grouped by
 creator, the reverse map from holders to markets, each creator's latest 100 trades by others for
 notifications, and the checkpoint. Replaying the journal rebuilds all of it. The model and its state

@@ -149,6 +149,8 @@ pub(super) struct Model {
     pub(super) holdings: BTreeMap<Address, BTreeMap<Address, u64>>,
     pub(super) supplies: BTreeMap<Address, u64>,
     pub(super) activity: BTreeMap<Address, TradeHistory>,
+    /// All purchases and transfers, in chain order, rebuilt from the journal.
+    pub(super) public_activity: Vec<Logged>,
     /// Reverse of `holdings`, maintained with it; queries never scan unrelated markets.
     #[serde(skip)]
     pub(super) held_by: BTreeMap<Address, BTreeSet<Address>>,
@@ -328,6 +330,11 @@ impl Model {
     pub(super) fn apply(&mut self, range: Range) {
         for logged in range.events {
             step(self, &logged.event).expect("validated keyring event");
+            if matches!(&logged.event, Event::Trade(t) if t.buy)
+                || matches!(&logged.event, Event::Transfer(_))
+            {
+                self.public_activity.push(logged.clone());
+            }
             let (position, transaction, timestamp) =
                 (logged.position, logged.transaction, logged.timestamp);
             let notice = match logged.event {

@@ -47,7 +47,7 @@ pub async fn status(State(state): State<Arc<AppState>>) -> Response {
                 "index": state.gateway.as_ref().and_then(|g| g.indexes.get(&id).map(|index| {
                     serde_json::to_value(index.status(g.indexes.keys())).expect("index status")
                 })),
-                "curated": state.policy.enabled(),
+                "curated": c.curated && state.policy.enabled(),
                 "closed_gate": published(Kind::Closed),
                 // Configured gates still being validated are omitted above.
                 "gates_pending": state.gate_checks.pending(id, c),

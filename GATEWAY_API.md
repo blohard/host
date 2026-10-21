@@ -1296,6 +1296,17 @@ input chunk) refuses the preview. Image URLs are checked to point at public HTTP
 image bytes are never fetched, stored or proxied, so this check cannot control a browser's later DNS
 lookup or an image server's redirects.
 
+DEX Screener pair links (`dexscreener.com/<chain>/<pair>`, also `www.dexscreener.com`)
+use its public pair API instead of fetching the webpage. The response must match the requested
+chain and pair. Cards show the token name and symbol, trading pair and exchange, and prefer the
+banner over the icon. Prices and market figures are omitted because previews are cached. The
+original link remains the card's destination. Other URLs still use HTML metadata.
+
+API requests use the same outbound address checks, shared slots and ten-second deadline, with the
+two-destination-slot limit applied to `api.dexscreener.com`. Responses must be JSON and fit within
+64 KiB after decompression; redirects are refused. Image addresses pass the normal HTTPS and
+operator-address checks. API throttles and server errors retain the normal retry cooldown.
+
 ### Limits and caching
 
 Each visitor has a preview allowance of its own, separate from uploads, names and chain reads: a

@@ -19,6 +19,21 @@ pub const URL_BYTES: usize = 2048;
 pub const FIRST_HTML_BYTES: usize = 32 << 10;
 pub const PREVIEW_HTML_BYTES: usize = 512 << 10;
 pub const HTML_BYTES: usize = 1 << 20;
+pub const JSON_BYTES: usize = 64 << 10;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Format {
+    Html,
+    Json,
+}
+impl Format {
+    fn media_type(self) -> &'static str {
+        match self {
+            Self::Html => "text/html",
+            Self::Json => "application/json",
+        }
+    }
+}
 const REFRESH: Duration = Duration::from_secs(300);
 const RETAIN: Duration = Duration::from_secs(7 * 86400);
 
@@ -338,7 +353,12 @@ impl Fetcher {
     }
     /// Open a page within the caller's deadline, which also covers its body
     /// reads and parsing. The page keeps its destination slot until dropped.
-    pub async fn fetch(&self, initial: Url, destination: Destination) -> Result<Page, Failure> {
+    pub async fn fetch(
+        &self,
+        initial: Url,
+        destination: Destination,
+        format: Format,
+    ) -> Result<Page, Failure> {
         let guard = self.guard().await?;
         // A fresh client prevents an idle connection outliving its address
         // policy. Never inherit proxy configuration, cookies or credentials.
@@ -357,7 +377,15 @@ impl Fetcher {
             .map_err(Failure::request)?;
         #[cfg(test)]
         let client = self.client.as_ref().unwrap_or(&client).clone();
-        fetch(&client, &guard, initial, &self.destinations, destination).await
+        fetch(
+            &client,
+            &guard,
+            initial,
+            &self.destinations,
+            destination,
+            format,
+        )
+        .await
     }
     /// Validate an image address without requesting its bytes. This cannot
     /// police a browser's later DNS lookup or an image server's redirects.
@@ -442,7 +470,7 @@ fn retry_after(value: Option<&reqwest::header::HeaderValue>, now: SystemTime) ->
     wait.min(crate::expiring::NEGATIVE_LIFETIME)
 }
 
-/// A checked HTML response, read in bounded prefixes without another request.
+/// A checked response, read within the selected format's bounds.
 /// Its destination stays occupied until the body is finished or abandoned.
 #[derive(Debug)]
 pub struct Page {
@@ -451,6 +479,19 @@ pub struct Page {
     _destination: Destination,
 }
 impl Page {
+    /// JSON must be complete, unlike a useful HTML head prefix. Reject an
+    /// oversized decoded chunk before copying it into the retained buffer.
+    pub async fn read_json(&mut self) -> Result<Vec<u8>, Failure> {
+        let mut bytes = Vec::new();
+        while let Some(chunk) = self.response.chunk().await.map_err(Failure::request)? {
+            if chunk.len() > JSON_BYTES - bytes.len() {
+                return Err(Failure::NoPreview);
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok(bytes)
+    }
+
     /// Read through this checkpoint, or EOF. One response chunk may cross
     /// the checkpoint, but never the hard cap. True means EOF was reached.
     pub async fn read_until(&mut self, bytes: &mut Vec<u8>, limit: usize) -> Result<bool, Failure> {
@@ -472,6 +513,7 @@ async fn fetch(
     mut target: Url,
     destinations: &Destinations,
     mut destination: Destination,
+    format: Format,
 ) -> Result<Page, Failure> {
     for hop in 0..=3 {
         guard.check_url(&target).map_err(|_| Failure::NoPreview)?;
@@ -480,7 +522,7 @@ async fn fetch(
         }
         let response = client
             .get(target.clone())
-            .header("accept", "text/html")
+            .header("accept", format.media_type())
             .send()
             .await
             .map_err(Failure::request)?;
@@ -492,7 +534,7 @@ async fn fetch(
             )));
         }
         if matches!(status.as_u16(), 301 | 302 | 303 | 307 | 308) {
-            if hop == 3 {
+            if hop == 3 || format == Format::Json {
                 return Err(Failure::NoPreview);
             }
             let location = response
@@ -520,7 +562,7 @@ async fn fetch(
             .next()
             .unwrap_or("")
             .trim()
-            .eq_ignore_ascii_case("text/html")
+            .eq_ignore_ascii_case(format.media_type())
         {
             return Err(Failure::NoPreview);
         }

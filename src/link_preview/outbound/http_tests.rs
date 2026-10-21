@@ -5,7 +5,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 async fn fetch(client: &Client, guard: &Guard, target: Url) -> Result<(Url, Vec<u8>), Failure> {
     let destinations = Destinations::default();
     let destination = destinations.take(&target)?;
-    let mut page = super::fetch(client, guard, target, &destinations, destination).await?;
+    let mut page = super::fetch(
+        client,
+        guard,
+        target,
+        &destinations,
+        destination,
+        Format::Html,
+    )
+    .await?;
     let mut bytes = Vec::new();
     page.read_until(&mut bytes, HTML_BYTES).await?;
     Ok((page.url, bytes))
@@ -135,7 +143,7 @@ async fn a_page_that_never_finishes_ends_at_the_deadline() {
     let start = Instant::now();
     let deadline = start + Duration::from_millis(300);
     let entry = service
-        .fetch_card(link.clone(), destination, permits, deadline)
+        .fetch_card(link.clone(), destination, permits, deadline, None)
         .await
         .unwrap();
     let elapsed = start.elapsed();
@@ -343,7 +351,15 @@ async fn slow_destination_cannot_fill_shared_slots_even_through_redirects() {
             let Ok((destination, _slot)) = destinations.admit(&target, &shared).await else {
                 return;
             };
-            let _ = super::fetch(&client, &guard, target, &destinations, destination).await;
+            let _ = super::fetch(
+                &client,
+                &guard,
+                target,
+                &destinations,
+                destination,
+                Format::Html,
+            )
+            .await;
         }));
     }
     for _ in 0..2 {
@@ -355,13 +371,29 @@ async fn slow_destination_cannot_fill_shared_slots_even_through_redirects() {
     let healthy = url("http://healthy.example/page").unwrap();
     let result = tokio::time::timeout(Duration::from_millis(200), async {
         let (destination, _slot) = destinations.admit(&healthy, &shared).await.unwrap();
-        super::fetch(&client, &guard, healthy, &destinations, destination).await
+        super::fetch(
+            &client,
+            &guard,
+            healthy,
+            &destinations,
+            destination,
+            Format::Html,
+        )
+        .await
     })
     .await;
     let redirect = url("http://healthy.example/redirect").unwrap();
     let redirected = tokio::time::timeout(Duration::from_millis(200), async {
         let (destination, _slot) = destinations.admit(&redirect, &shared).await.unwrap();
-        super::fetch(&client, &guard, redirect, &destinations, destination).await
+        super::fetch(
+            &client,
+            &guard,
+            redirect,
+            &destinations,
+            destination,
+            Format::Html,
+        )
+        .await
     })
     .await;
     for request in requests {
@@ -511,6 +543,7 @@ async fn preview_stops_at_a_finished_head_or_its_byte_and_time_limits() {
                     } else {
                         Duration::from_secs(2)
                     },
+                None,
             )
             .await
             .unwrap();
@@ -713,4 +746,219 @@ async fn redirects_are_rechecked_and_fetching_is_html_only_and_bounded() {
         Failure::temporary()
     );
     task.abort();
+}
+
+#[tokio::test]
+async fn dexscreener_admission_counts_the_api_host_before_spending_post_budget() {
+    use super::super::{PreviewSource, Previews};
+    let service = Arc::new(
+        Previews::new(Config {
+            public_names: vec!["operator.invalid".into()],
+        })
+        .unwrap(),
+    );
+    let api = url("https://api.dexscreener.com/").unwrap();
+    let held = [(); 2].map(|_| service.fetcher.destinations.take(&api).unwrap());
+    for link in [
+        "https://dexscreener.com/base/abc",
+        "https://www.dexscreener.com/solana/AbCd",
+    ] {
+        assert!(matches!(
+            service
+                .read_admitted(
+                    url(link).unwrap(),
+                    PreviewSource::Post { chain: 1, id: 1 },
+                    None
+                )
+                .await,
+            Err(5)
+        ));
+        assert!(service.cache.get(&link.to_owned()).is_none());
+    }
+    assert!(service.post_budget.lock().unwrap().0.is_empty());
+    assert_eq!(service.slots.available_permits(), 8);
+    drop(held);
+}
+
+#[tokio::test]
+async fn dexscreener_cards_keep_transport_bounds_deadlines_and_image_policy() {
+    use super::super::{PreviewSource, Previews, dexscreener};
+    use axum::{
+        extract::Path,
+        http::{HeaderMap, StatusCode},
+    };
+    use futures::StreamExt as _;
+    use serde_json::json;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let redirects = Arc::new(AtomicUsize::new(0));
+    let reached = redirects.clone();
+    let app = Router::new()
+        .route(
+            "/redirect-target",
+            get(move || {
+                reached.fetch_add(1, Ordering::SeqCst);
+                async { axum::Json(json!({"pairs":[]})) }
+            }),
+        )
+        .route(
+            "/{case}",
+            get(|Path(case): Path<String>, headers: HeaderMap| async move {
+                assert_eq!(headers["accept"], "application/json");
+                if case == "redirect" {
+                    return (StatusCode::FOUND, [("location", "/redirect-target")], "")
+                        .into_response();
+                }
+                if case == "busy" {
+                    return (StatusCode::TOO_MANY_REQUESTS, [("retry-after", "120")], "")
+                        .into_response();
+                }
+                if case == "server-error" {
+                    return StatusCode::BAD_GATEWAY.into_response();
+                }
+                if case == "compressed-large" {
+                    return ([("content-type", "application/json"), ("content-encoding", "gzip")],
+                        hex::decode("1f8b08000000000002ffedcb3b0e82501086d1ad98a95d011d765652d8198b7b8544220f03b13084bd0baee39cf2ff669678a7769aa3b82df178a67638d751444e7313c77f2aeb7a6ae6ed20527e6cdb9eaee3ab19a25862487db395b23d7d72eef697f9dbe7b1dbb77375a9625defeb01000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000363fa59d18ab63000100").unwrap()).into_response();
+                }
+                if case == "missing" {
+                    return StatusCode::NOT_FOUND.into_response();
+                }
+                if case == "wrong-type" {
+                    return ([("content-type", "text/html")], "<title>challenge</title>")
+                        .into_response();
+                }
+                let image = match case.as_str() {
+                    "operator-name" => "https://operator.invalid/image",
+                    "operator-ip" => "https://8.8.4.4/image",
+                    _ => "https://8.8.8.8/image",
+                };
+                let mut body = json!({"pairs":[{
+                    "chainId":"base", "pairAddress":"abc",
+                    "baseToken":{"name":"AiBubble", "symbol":"AIPOP"},
+                    "quoteToken":{"symbol":"WETH"}, "dexId":"uniswap",
+                    "info":{"header":image}
+                }]})
+                .to_string();
+                if case == "malformed" {
+                    body = "{".into();
+                }
+                if case == "unknown" {
+                    body = r#"{"pairs":null}"#.into();
+                }
+                if case == "large" {
+                    body.push_str(&" ".repeat(JSON_BYTES));
+                }
+                if case == "exact" {
+                    body.push_str(&" ".repeat(JSON_BYTES - body.len()));
+                }
+                if case == "stalled" {
+                    let chunks = futures::stream::once(async {
+                        Ok::<_, std::io::Error>(bytes::Bytes::from_static(b"{"))
+                    })
+                    .chain(futures::stream::pending());
+                    return (
+                        [("content-type", "application/json")],
+                        axum::body::Body::from_stream(chunks),
+                    )
+                        .into_response();
+                }
+                ([("content-type", "application/json; charset=utf-8")], body).into_response()
+            }),
+        );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let mut service = Previews::new(Config {
+        public_names: vec!["operator.invalid".into()],
+    })
+    .unwrap();
+    service.fetcher.client = Some(
+        Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .gzip(true)
+            .resolve("api.dexscreener.com", address)
+            .build()
+            .unwrap(),
+    );
+    service
+        .fetcher
+        .discovery
+        .lock()
+        .await
+        .update(Instant::now(), HashSet::from(["8.8.4.4".parse().unwrap()]))
+        .unwrap();
+
+    for (case, expected) in [
+        ("ok", Ok(Some(true))),
+        ("exact", Ok(Some(true))),
+        ("operator-name", Ok(Some(false))),
+        ("operator-ip", Ok(Some(false))),
+        ("unknown", Ok(None)),
+        ("malformed", Ok(None)),
+        ("missing", Ok(None)),
+        ("wrong-type", Ok(None)),
+        ("large", Ok(None)),
+        ("compressed-large", Ok(None)),
+        ("redirect", Ok(None)),
+        ("busy", Err(())),
+        ("server-error", Err(())),
+        ("stalled", Err(())),
+    ] {
+        let target = url(&format!("http://api.dexscreener.com/{case}")).unwrap();
+        let (destination, permits) = service
+            .admit(&target, PreviewSource::Draft, None)
+            .await
+            .unwrap();
+        let pair =
+            dexscreener::Pair::from_url(&url("https://dexscreener.com/base/abc").unwrap()).unwrap();
+        let deadline = Instant::now()
+            + if case == "stalled" {
+                Duration::from_millis(150)
+            } else {
+                Duration::from_secs(2)
+            };
+        let entry = service
+            .fetch_card(target.clone(), destination, permits, deadline, Some(pair))
+            .await
+            .unwrap();
+        if let Ok(Some(card)) = &entry.value {
+            assert_eq!(card.title, "AiBubble (AIPOP)");
+            assert_eq!(card.description, "AIPOP / WETH · base · uniswap");
+        }
+        assert_eq!(
+            entry
+                .value
+                .map(|card| card.map(|card| card.image.is_some())),
+            expected,
+            "{case}"
+        );
+        if case == "busy" {
+            assert!(entry.until > Instant::now() + Duration::from_secs(115));
+            assert!(entry.until <= Instant::now() + Duration::from_secs(120));
+        }
+        if case == "stalled" {
+            assert!(entry.until > Instant::now() + Duration::from_secs(295));
+        }
+        assert_eq!(
+            service.slots.available_permits(),
+            8,
+            "{case}: shared permit released"
+        );
+        assert_eq!(
+            service.drafts.available_permits(),
+            2,
+            "{case}: draft permit released"
+        );
+        let free = [(); 2].map(|_| service.fetcher.destinations.take(&target));
+        assert!(
+            free.iter().all(Result::is_ok),
+            "{case}: destination permits released"
+        );
+    }
+    assert_eq!(
+        redirects.load(Ordering::SeqCst),
+        0,
+        "API redirects are not followed"
+    );
+    server.abort();
 }

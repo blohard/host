@@ -1,5 +1,6 @@
 //! Disposable link metadata. Images stay on their origin; this service never
 //! downloads them. No chain reads or persistent writes belong on this path.
+mod dexscreener;
 mod http;
 pub use http::{authorize_or_cached_response, draft, lookup};
 mod metadata;
@@ -189,10 +190,12 @@ impl Previews {
             .run(flight, || self.cache.get(&key).map(Ok), async move {
                 // The worker owns the permits until it finishes: a reader that
                 // disconnects cannot free capacity its fetch still uses.
-                let (destination, permits) = service.admit(&url, source, visitor).await?;
+                let pair = dexscreener::Pair::from_url(&url);
+                let target = pair.as_ref().map_or(url, dexscreener::Pair::endpoint);
+                let (destination, permits) = service.admit(&target, source, visitor).await?;
                 let deadline = Instant::now() + FETCH_DEADLINE;
                 let entry = service
-                    .fetch_card(url, destination, permits, deadline)
+                    .fetch_card(target, destination, permits, deadline, pair)
                     .await?;
                 service.remember(source, worker_key, &entry);
                 Ok(entry)
@@ -256,41 +259,53 @@ impl Previews {
         destination: outbound::Destination,
         permits: FetchPermits,
         deadline: Instant,
+        pair: Option<dexscreener::Pair>,
     ) -> Result<Entry, u64> {
         let fetched = tokio::time::timeout_at(deadline.into(), async {
-            let mut page = self.fetcher.fetch(url, destination).await?;
-            let mut bytes = Vec::new();
-            let mut permits = permits;
-            let mut limit = outbound::FIRST_HTML_BYTES;
-            let parsed = loop {
-                let ended = page.read_until(&mut bytes, limit).await?;
-                let base = page.url.clone();
-                // Doubling checkpoints bounds re-parsing to about twice the
-                // final prefix. Each parse owns the permits and shares the deadline.
-                let ((answer, retained), returned) = blocking_with(permits, move || {
-                    (metadata::parse(&bytes, &base, deadline), bytes)
-                })
-                .await?;
-                bytes = retained;
-                permits = returned;
-                let parsed = answer?;
-                if parsed.finished
-                    || ended
-                    || bytes.len() == outbound::HTML_BYTES
-                    // Give early titles a chance to acquire the rest of their
-                    // metadata; read beyond 512 KiB only if none was found.
-                    || (bytes.len() >= outbound::PREVIEW_HTML_BYTES && parsed.metadata.is_some())
-                {
-                    break parsed.metadata;
-                }
-                // A response chunk can cross several checkpoints. Skip those
-                // rather than parsing the same prefix again.
-                limit = (bytes.len() + 1)
-                    .next_power_of_two()
-                    .min(outbound::HTML_BYTES);
+            let format = if pair.is_some() {
+                outbound::Format::Json
+            } else {
+                outbound::Format::Html
+            };
+            let mut page = self.fetcher.fetch(url, destination, format).await?;
+            let (parsed, permits) = if let Some(pair) = pair {
+                let bytes = page.read_json().await?;
+                let (parsed, permits) = blocking_with(permits, move || pair.parse(&bytes)).await?;
+                (parsed?, permits)
+            } else {
+                let mut bytes = Vec::new();
+                let mut permits = permits;
+                let mut limit = outbound::FIRST_HTML_BYTES;
+                let parsed = loop {
+                    let ended = page.read_until(&mut bytes, limit).await?;
+                    let base = page.url.clone();
+                    // Doubling checkpoints bounds re-parsing to about twice the
+                    // final prefix. Each parse owns the permits and shares the deadline.
+                    let ((answer, retained), returned) = blocking_with(permits, move || {
+                        (metadata::parse(&bytes, &base, deadline), bytes)
+                    })
+                    .await?;
+                    bytes = retained;
+                    permits = returned;
+                    let parsed = answer?;
+                    // Read beyond 512 KiB only when no metadata was found yet.
+                    if parsed.finished
+                        || ended
+                        || bytes.len() == outbound::HTML_BYTES
+                        || (bytes.len() >= outbound::PREVIEW_HTML_BYTES
+                            && parsed.metadata.is_some())
+                    {
+                        break parsed.metadata;
+                    }
+                    // A response chunk can cross several checkpoints. Skip those
+                    // rather than parsing the same prefix again.
+                    limit = (bytes.len() + 1)
+                        .next_power_of_two()
+                        .min(outbound::HTML_BYTES);
+                };
+                (parsed, permits)
             };
             drop(page);
-            drop(bytes);
             // The image check is outbound work too, so it keeps the permits.
             let card = match parsed {
                 Some(mut metadata) => {

@@ -58,6 +58,24 @@ pub(super) struct Transfer {
     pub(super) amount: u64,
 }
 
+/// Public cards are derived from journal events; an activation and its
+/// adjacent self-purchase share one card at the purchase's position.
+#[derive(Clone, Debug, Serialize)]
+pub(super) struct Activity {
+    pub(super) position: Position,
+    transaction: Hash,
+    timestamp: u32,
+    pub(super) event: ActivityEvent,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(super) enum ActivityEvent {
+    Activated { creator: Address, amount: u64 },
+    Trade(Trade),
+    Transfer(Transfer),
+}
+
 /// An account's recent key activity is a bounded notification inbox, not a
 /// market-history archive: trades of its own market by others, and keys
 /// someone moved to it.
@@ -149,8 +167,8 @@ pub(super) struct Model {
     pub(super) holdings: BTreeMap<Address, BTreeMap<Address, u64>>,
     pub(super) supplies: BTreeMap<Address, u64>,
     pub(super) activity: BTreeMap<Address, TradeHistory>,
-    /// All purchases and transfers, in chain order, rebuilt from the journal.
-    pub(super) public_activity: Vec<Logged>,
+    /// Activations, purchases and transfers, in chain order, rebuilt from the journal.
+    pub(super) public_activity: Vec<Activity>,
     /// Reverse of `holdings`, maintained with it; queries never scan unrelated markets.
     #[serde(skip)]
     pub(super) held_by: BTreeMap<Address, BTreeSet<Address>>,
@@ -330,11 +348,7 @@ impl Model {
     pub(super) fn apply(&mut self, range: Range) {
         for logged in range.events {
             step(self, &logged.event).expect("validated keyring event");
-            if matches!(&logged.event, Event::Trade(t) if t.buy)
-                || matches!(&logged.event, Event::Transfer(_))
-            {
-                self.public_activity.push(logged.clone());
-            }
+            self.record_activity(&logged);
             let (position, transaction, timestamp) =
                 (logged.position, logged.transaction, logged.timestamp);
             let notice = match logged.event {
@@ -368,6 +382,39 @@ impl Model {
             }
         }
         self.checkpoint = Some(range.through);
+    }
+
+    fn record_activity(&mut self, logged: &Logged) {
+        let event = match &logged.event {
+            Event::Activated { creator } => ActivityEvent::Activated {
+                creator: *creator,
+                amount: 0,
+            },
+            Event::Trade(t) if t.buy => {
+                if let Some(last) = self.public_activity.last_mut()
+                    && last.transaction == logged.transaction
+                    && last.position.block == logged.position.block
+                    && last.position.log.checked_add(1) == Some(logged.position.log)
+                    && let ActivityEvent::Activated { creator, amount } = &mut last.event
+                    && *amount == 0
+                    && *creator == t.creator
+                    && t.holder == t.creator
+                {
+                    *amount = t.amount;
+                    last.position = logged.position;
+                    return;
+                }
+                ActivityEvent::Trade(t.clone())
+            }
+            Event::Transfer(t) => ActivityEvent::Transfer(t.clone()),
+            Event::Trade(_) => return,
+        };
+        self.public_activity.push(Activity {
+            position: logged.position,
+            transaction: logged.transaction,
+            timestamp: logged.timestamp,
+            event,
+        });
     }
 
     pub(super) fn authors(&self, holder: Address) -> (Vec<Address>, Vec<Address>) {

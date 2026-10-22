@@ -1082,11 +1082,12 @@ preview build slots. Answers keep `Cache-Control: no-store` for outside caches.
 
 ## Account keyring
 
-### Public purchases and transfers
+### Public activations, purchases and transfers
 
-`GET /api/chains/{chain}/keyring/activity?limit=20` returns all accepted key purchases
-(including buying one's own keys) and transfers, newest first. Sales and activations without
-purchases are excluded. This is a local index read with no RPC calls:
+`GET /api/chains/{chain}/keyring/activity?limit=20` returns account-key activations,
+purchases (including buying one's own keys) and transfers, newest first. Sales are excluded.
+An activation and its immediately following self-purchase in the same transaction form
+one item, positioned at the purchase. This is a local index read with no RPC calls:
 
 ```text
 { market, checkpoint: { block, hash }, items, next }
@@ -1096,6 +1097,8 @@ Each item has `position: { block, log }`, `transaction`, `timestamp` and `event`
 decimal strings, log indexes and amounts are u32 numbers, and timestamps are Unix seconds.
 A purchase's event is `{ kind: "trade", creator, holder, buy: true, amount, supply }`;
 a transfer's is `{ kind: "transfer", creator, from, to, amount }`.
+An activation's is `{ kind: "activated", creator, amount }`, where `amount` is the initial
+purchase or zero when there was none. Later purchases remain separate items.
 
 The limit is 1–100 (default 20). Pass both `before_block` and `before_log` from `next` to
 continue; the cursor is exclusive. Invalid queries return 400 `invalid_trade_query`.
@@ -1106,7 +1109,7 @@ public activity index. The existing keyring readiness rules apply: unavailable i
 503 `keyring_syncing`, and unconfigured chains return 404 `keyring_not_configured`.
 
 The web app interleaves these events with conversations in Everyone on that chain, using
-block and log position. Purchases and transfers link to the creator's keys page. Other
+block and log position. All activity cards link to the creator's keys page. Other
 streams stay unchanged. Quiet polls cue Refresh without inserting rows while the reader
 is scrolling. A failed key read leaves posts usable and offers a retry.
 

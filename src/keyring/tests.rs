@@ -1944,7 +1944,11 @@ fn public_activity_keeps_purchases_and_transfers_including_own_keys() {
     let next = k
         .activity(Some(Position { block: 10, log: 2 }), 1, |_| false)
         .unwrap();
-    assert_eq!(next["items"][0]["event"]["holder"], json!(CREATOR));
+    assert_eq!(
+        next["items"][0]["event"],
+        json!({"kind":"activated", "creator":CREATOR, "amount":3})
+    );
+    assert_eq!(next["items"][0]["position"], json!({"block":"10", "log":1}));
     assert!(next["next"].is_null());
     let blocked = k.activity(None, 20, |a| *a == other).unwrap();
     assert_eq!(blocked["items"].as_array().unwrap().len(), 1);
@@ -1961,10 +1965,13 @@ fn public_activity_keeps_purchases_and_transfers_including_own_keys() {
 #[test]
 fn public_activity_filtered_pages_advance_without_scanning_all_history() {
     let mut m = blank();
-    for n in 0..2_005 {
-        m.public_activity
-            .push(at(10, n, trade(CREATOR, true, 1, 1)));
-    }
+    m.apply(range(
+        10,
+        10,
+        (0..2_005)
+            .map(|n| at(10, n, trade(CREATOR, true, 1, u64::from(n) + 1)))
+            .collect(),
+    ));
     let k = Keyring::detached_with(config(), m, KeyState::Ready);
     let p = k.activity(None, 20, |_| true).unwrap();
     assert!(p["items"].as_array().unwrap().is_empty());
@@ -2021,7 +2028,72 @@ async fn public_activity_route_checks_queries_and_never_reads_rpc() {
                 .await
                 .unwrap();
             let p: Value = serde_json::from_slice(&bytes).unwrap();
-            assert_eq!(p["items"].as_array().unwrap().len(), 2);
+            assert_eq!(p["items"].as_array().unwrap().len(), 3);
         }
+    }
+}
+
+#[test]
+fn public_activation_without_purchase_does_not_absorb_a_later_transaction() {
+    let mut later = at(10, 1, trade(CREATOR, true, 2, 2));
+    later.transaction = Hex([99; 32]);
+    let ranges = vec![range(10, 10, vec![at(10, 0, activated()), later])];
+    // Replay derives the same cards from unchanged journal events.
+    let restored: Vec<Range> =
+        serde_json::from_slice(&serde_json::to_vec(&ranges).unwrap()).unwrap();
+    for ranges in [ranges, restored] {
+        let mut m = Model::default();
+        for r in ranges {
+            m.check(&config(), &r).unwrap();
+            m.apply(r);
+        }
+        let k = Keyring::detached_with(config(), m, KeyState::Ready);
+        let p = k.activity(None, 1, |_| false).unwrap();
+        assert_eq!(p["items"][0]["event"]["kind"], "trade");
+        let p = k
+            .activity(Some(Position { block: 10, log: 1 }), 1, |_| false)
+            .unwrap();
+        assert_eq!(
+            p["items"][0]["event"],
+            json!({"kind":"activated", "creator":CREATOR, "amount":0})
+        );
+        assert!(p["next"].is_null());
+        assert!(
+            k.activity(None, 20, |a| *a == CREATOR).unwrap()["items"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
+#[test]
+fn public_activation_combines_only_the_adjacent_initial_self_purchase() {
+    for (holder, log, combined) in [
+        (CREATOR, 1, true),
+        (CREATOR, 2, false),
+        (Hex([2; 20]), 1, false),
+    ] {
+        let mut m = Model::default();
+        let r = range(
+            10,
+            10,
+            vec![
+                at(10, 0, activated()),
+                at(10, log, trade(holder, true, 2, 2)),
+                at(10, log + 1, trade(CREATOR, true, 1, 3)),
+            ],
+        );
+        m.check(&config(), &r).unwrap();
+        m.apply(r);
+        let k = Keyring::detached_with(config(), m, KeyState::Ready);
+        let p = k.activity(None, 20, |_| false).unwrap();
+        let items = p["items"].as_array().unwrap();
+        assert_eq!(items.len(), if combined { 2 } else { 3 });
+        assert_eq!(items[0]["event"]["kind"], "trade");
+        assert_eq!(
+            items.last().unwrap()["event"],
+            json!({"kind":"activated", "creator":CREATOR, "amount":if combined {2} else {0}})
+        );
     }
 }

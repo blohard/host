@@ -250,7 +250,7 @@ impl Keyring {
         })
     }
 
-    /// Public purchases and transfers, newest first. A cursor seeks directly;
+    /// Public activations, purchases and transfers, newest first. A cursor seeks directly;
     /// filtering scans at most 2,000 events, including hidden accounts.
     pub fn activity(
         &self,
@@ -267,9 +267,9 @@ impl Keyring {
                 at -= 1;
                 let e = &events[at];
                 let hidden = match &e.event {
-                    model::Event::Trade(t) => blocked(&t.creator) || blocked(&t.holder),
-                    model::Event::Transfer(t) => blocked(&t.creator) || blocked(&t.from) || blocked(&t.to),
-                    model::Event::Activated { .. } => true,
+                    model::ActivityEvent::Trade(t) => blocked(&t.creator) || blocked(&t.holder),
+                    model::ActivityEvent::Transfer(t) => blocked(&t.creator) || blocked(&t.from) || blocked(&t.to),
+                    model::ActivityEvent::Activated { creator, .. } => blocked(creator),
                 };
                 if !hidden { items.push(e); }
             }

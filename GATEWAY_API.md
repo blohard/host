@@ -1001,7 +1001,7 @@ recipients.
 Fetch and verify a record as described in
 [STORE_API.md](STORE_API.md#envelope-bytes-and-safe-interpretation) before reading it.
 
-Render `text/plain` on the client as escaped text with its line breaks, flat `*bold*` and
+Render `text/plain` on the client as escaped text with its line breaks, combinable `*bold*` and
 `_italics_` spans, and clickable URLs and domains ([spec §6][spec-text]). The host returns the
 original bytes, not formatted HTML. Link metadata comes through the host. Thumbnails from outside
 sites load automatically for your own posts and the authors you follow; other thumbnails wait for a

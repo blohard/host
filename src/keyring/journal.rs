@@ -87,7 +87,6 @@ impl Keyring {
             "keyring requires a chain, market and its deployment block"
         );
         let cfg = journal_config(
-            &context,
             format!("keyring-{}-{}", config.chain, config.market),
             MAX_RECORD_BYTES,
         );
@@ -111,16 +110,21 @@ impl Keyring {
         }
         if journal.size() > 1 {
             let records = journal
-                .replay(1, NZUsize!(REPLAY_BUFFER), ReadOptions::default())
+                .replay(
+                    1..journal.size(),
+                    NZUsize!(REPLAY_BUFFER),
+                    ReadOptions::default(),
+                )
                 .await?;
             let mut records = std::pin::pin!(records);
-            while let Some(record) = records.next().await {
-                let (i, bytes) = record?;
-                let range: Range = serde_json::from_slice(&bytes)?;
-                model
-                    .check(&config, &range)
-                    .with_context(|| format!("keyring replay failed at journal record {i}"))?;
-                model.apply(range);
+            while let Some(batch) = records.next().await {
+                for (i, bytes) in batch? {
+                    let range: Range = serde_json::from_slice(&bytes)?;
+                    model
+                        .check(&config, &range)
+                        .with_context(|| format!("keyring replay failed at journal record {i}"))?;
+                    model.apply(range);
+                }
             }
         }
         // The block after the last journaled checkpoint. RAM may be ahead of

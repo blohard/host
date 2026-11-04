@@ -229,7 +229,6 @@ impl Index {
         generation: Hash,
     ) -> Result<Self> {
         let cfg = journal_config(
-            &context,
             format!("index-{}-{}", deployment.chain, deployment.board),
             MAX_BATCH_BYTES,
         );
@@ -259,15 +258,20 @@ impl Index {
         // than a positioned read for each.
         if journal.size() > 1 {
             let records = journal
-                .replay(1, NZUsize!(REPLAY_BUFFER), ReadOptions::default())
+                .replay(
+                    1..journal.size(),
+                    NZUsize!(REPLAY_BUFFER),
+                    ReadOptions::default(),
+                )
                 .await?;
             let mut records = std::pin::pin!(records);
-            while let Some(record) = records.next().await {
-                let (i, bytes) = record?;
-                let update: Update = serde_json::from_slice(&bytes)?;
-                model.validate_update(&update)?;
-                apply(&mut model, update)
-                    .with_context(|| format!("index replay failed at journal record {i}"))?;
+            while let Some(batch) = records.next().await {
+                for (i, bytes) in batch? {
+                    let update: Update = serde_json::from_slice(&bytes)?;
+                    model.validate_update(&update)?;
+                    apply(&mut model, update)
+                        .with_context(|| format!("index replay failed at journal record {i}"))?;
+                }
             }
         }
         let view = Arc::new(RwLock::new(View {

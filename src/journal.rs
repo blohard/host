@@ -16,10 +16,16 @@ use commonware_utils::{NZU16, NZU64, NZUsize};
 pub(crate) const CHECKPOINT_BLOCKS: u64 = 300;
 /// Read-ahead for replaying either journal at startup.
 pub(crate) const REPLAY_BUFFER: usize = 64 << 10;
+/// How long a test waits after dropping an index or keyring before it opens
+/// the same partitions again. The writer task holds the journal until it
+/// sees the handle go, and the runtime refuses a second open of a blob while
+/// the first is still alive. In the deterministic runtime the old handle is
+/// gone about 2 ms after the drop, so 10 ms leaves room.
+#[cfg(test)]
+pub(crate) const WRITER_CLOSE: std::time::Duration = std::time::Duration::from_millis(10);
 
 /// Settings for bounded JSON records in the Board and keyring journals.
-pub(crate) fn journal_config<E: Context>(
-    context: &E,
+pub(crate) fn journal_config(
     partition: String,
     max_record: usize,
 ) -> Config<<Vec<u8> as commonware_codec::Read>::Cfg> {
@@ -28,7 +34,7 @@ pub(crate) fn journal_config<E: Context>(
         items_per_section: NZU64!(1024),
         compression: None,
         codec_config: ((0..=max_record).into(), ()),
-        page_cache: CacheRef::from_pooler(context, NZU16!(4096), NZUsize!(64)),
+        page_cache: CacheRef::new(NZU16!(4096), NZUsize!(64)),
         write_buffer: NZUsize!(64 << 10),
         replay_buffer: NZUsize!(REPLAY_BUFFER),
     }

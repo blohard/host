@@ -44,13 +44,10 @@ edition = "2024"
 license = "MIT"
 
 [workspace.dependencies]
-# Pinned to the commit this code was written against, from Commonware's pull
-# request 4644, which has since been merged. Moving to a release needs a check
-# that existing stores still open.
-commonware-codec = { git = "https://github.com/commonwarexyz/monorepo", rev = "7be24c73fc39d117bfa51f1df0ccd0e6b5b87f42" }
-commonware-runtime = { git = "https://github.com/commonwarexyz/monorepo", rev = "7be24c73fc39d117bfa51f1df0ccd0e6b5b87f42" }
-commonware-storage = { git = "https://github.com/commonwarexyz/monorepo", rev = "7be24c73fc39d117bfa51f1df0ccd0e6b5b87f42" }
-commonware-utils = { git = "https://github.com/commonwarexyz/monorepo", rev = "7be24c73fc39d117bfa51f1df0ccd0e6b5b87f42" }
+commonware-codec = "2026.10.0"
+commonware-runtime = "2026.10.0"
+commonware-storage = "2026.10.0"
+commonware-utils = "2026.10.0"
 
 alloy-sol-types = "1.7"
 alloy-primitives = "1.7"

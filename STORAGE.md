@@ -254,10 +254,11 @@ host shares one lookup of the confirmed head per chain per pass. A provisional u
 but fetched bytes go through the same upload checks before they can be served.
 
 The name and peer caches use `expiring::Expiring`, a cache of fixed size whose entries expire a set
-time after they were added. When it is full, it evicts single entries using the CLOCK algorithm, an
-approximation of least recently used, rather than clearing everything. Reading an entry doesn't
-extend its life. Eviction or a restart can forget a peer's cooldown, so backoff is a bounded cache
-of retry state, not a promise never to retry sooner.
+time after they were added. When it is full, it evicts single entries using Clock2Q+, an
+approximation of least recently used, rather than clearing everything. A new key stays on probation
+until it is asked for again, so a flood of one-off keys can't push out the entries readers keep
+asking for. Reading an entry doesn't extend its life. Eviction or a restart can forget a peer's
+cooldown, so backoff is a bounded cache of retry state, not a promise never to retry sooner.
 
 Peer and name fetches keep running when the request that started them disconnects, so other requests
 can join them. `flights::Flights` holds the shared key and the capacity until the work finishes, and

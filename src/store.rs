@@ -143,7 +143,7 @@ impl<E: Context + Spawner> ContentStore<E> {
         let cfg = FreezerConfig {
             key_partition: format!("{p}-freezer-keys"),
             key_write_buffer: NZUsize!(1 << 20),
-            key_page_cache: CacheRef::from_pooler(&context, NZU16!(4096), pages),
+            key_page_cache: CacheRef::new(NZU16!(4096), pages),
             value_partition: format!("{p}-freezer-values"),
             value_compression: None,
             value_write_buffer: NZUsize!(1 << 20),
@@ -252,7 +252,7 @@ impl<E: Context + Spawner> ContentStore<E> {
             let Inner {
                 freezer, commits, ..
             } = inner;
-            match freezer.put(digest, content).await {
+            match freezer.put(digest, &content).await {
                 Ok((freezer, _)) => (
                     Some(Inner {
                         freezer,

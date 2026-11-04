@@ -683,7 +683,7 @@ fn journal_replay_restores_checkpoint_generation_and_indexes() {
         assert_eq!(index.view.read().unwrap().model.counts[&1], 1);
         drop(index);
         // Let the owner drain and close before another handle opens the partitions.
-        ctx.sleep(std::time::Duration::from_millis(1)).await;
+        ctx.sleep(crate::journal::WRITER_CLOSE).await;
         let restored = Index::open(ctx.child("restart"), deployment(), hash(99))
             .await
             .unwrap();
@@ -737,7 +737,7 @@ fn cancelled_acknowledgement_does_not_cancel_the_durable_write() {
         ctx.sleep(std::time::Duration::from_millis(10)).await;
         assert_eq!(index.view.read().unwrap().model.at.sequence, 1);
         drop(index);
-        ctx.sleep(std::time::Duration::from_millis(1)).await;
+        ctx.sleep(crate::journal::WRITER_CLOSE).await;
         let restored = Index::open(ctx.child("restart"), deployment(), hash(9))
             .await
             .unwrap();
@@ -919,7 +919,7 @@ fn a_journal_waits_to_be_established_and_cannot_be_reused_for_another_start_bloc
     deterministic::Runner::default().start(|ctx| async move {
         let index = opened(ctx.child("index"), deployment(), hash(2)).await;
         drop(index);
-        ctx.sleep(std::time::Duration::from_millis(1)).await;
+        ctx.sleep(crate::journal::WRITER_CLOSE).await;
         let reopened = Index::open(ctx.child("restart"), deployment(), hash(3))
             .await
             .unwrap();
@@ -930,7 +930,7 @@ fn a_journal_waits_to_be_established_and_cannot_be_reused_for_another_start_bloc
         );
         reopened.establish().unwrap();
         drop(reopened);
-        ctx.sleep(std::time::Duration::from_millis(1)).await;
+        ctx.sleep(crate::journal::WRITER_CLOSE).await;
         let mut other = deployment();
         other.start_block += 1;
         assert!(
@@ -1625,7 +1625,7 @@ fn a_torn_journal_tail_is_dropped_and_a_cut_into_acknowledged_records_is_refused
         }
         let at = at.unwrap();
         drop(index);
-        ctx.sleep(std::time::Duration::from_millis(1)).await;
+        ctx.sleep(crate::journal::WRITER_CLOSE).await;
         let d = deployment();
         let partition = format!("index-{}-{}_data", d.chain, d.board);
         let names = ctx.scan(&partition).await.unwrap();
@@ -1649,7 +1649,7 @@ fn a_torn_journal_tail_is_dropped_and_a_cut_into_acknowledged_records_is_refused
             assert_eq!(view.model.messages.len(), 16);
         }
         drop(reopened);
-        ctx.sleep(std::time::Duration::from_millis(1)).await;
+        ctx.sleep(crate::journal::WRITER_CLOSE).await;
         let (blob, size) = ctx.open(&partition, &names[0]).await.unwrap();
         blob.resize(size - 3).await.unwrap();
         blob.sync().await.unwrap();
@@ -1693,7 +1693,7 @@ async fn reopen<
 ) -> Index {
     drop(index);
     // Let the owner drain and close before another handle opens the partitions.
-    ctx.sleep(std::time::Duration::from_millis(1)).await;
+    ctx.sleep(crate::journal::WRITER_CLOSE).await;
     Index::open(ctx.child(label), deployment(), hash(99))
         .await
         .unwrap()

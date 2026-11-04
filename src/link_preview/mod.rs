@@ -105,7 +105,7 @@ struct FetchPermits {
 pub struct Previews {
     fetcher: outbound::Fetcher,
     // With 2 KiB URL keys and bounded fields, 1024 entries hold under 6 MiB
-    // of strings. CLOCK eviction keeps a one-off URL flood bounded.
+    // of strings. Clock2Q+ eviction keeps a one-off URL flood bounded.
     cache: Expiring<String, Entry>,
     flights: Flights<(bool, String), Result<Entry, u64>>,
     // Uncached draft work shares one host-wide allowance, regardless of visitors.

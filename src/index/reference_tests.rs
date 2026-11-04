@@ -314,7 +314,7 @@ fn source_journal_replays_cross_chain_associations_without_target_journal() {
             .unwrap();
         let at = source.view.read().unwrap().model.at.clone();
         drop(source);
-        ctx.sleep(std::time::Duration::from_millis(1)).await;
+        ctx.sleep(crate::journal::WRITER_CLOSE).await;
         let restored = Index::open(ctx.child("restart"), deployment(42), hash(99))
             .await
             .unwrap();

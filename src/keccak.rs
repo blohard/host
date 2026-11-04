@@ -3,8 +3,8 @@
 //! commits to on the chain, checkable by an EVM contract at native-opcode
 //! cost.
 
-use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
+use bytes::BufMut;
+use commonware_codec::{Buf, Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_utils::{Array, Span};
 use core::{
     fmt::{Debug, Display},

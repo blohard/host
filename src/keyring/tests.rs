@@ -634,7 +634,7 @@ async fn reopen<E: StorageContext + commonware_runtime::Spawner + commonware_run
 ) -> Result<Arc<Keyring>> {
     drop(keyring);
     // Let the writer drain and close before another handle opens the partition.
-    ctx.sleep(Duration::from_millis(1)).await;
+    ctx.sleep(crate::journal::WRITER_CLOSE).await;
     Keyring::open(ctx.child(label), config()).await
 }
 fn seeded() -> Vec<Range> {
@@ -691,7 +691,7 @@ fn chain_specific_journals_keep_balances_separate_after_reopening() {
         }
         drop(mainnet);
         drop(sepolia);
-        ctx.sleep(Duration::from_millis(1)).await;
+        ctx.sleep(crate::journal::WRITER_CLOSE).await;
         let mainnet = Keyring::open(ctx.child("base_reopened"), base)
             .await
             .unwrap();
@@ -789,7 +789,7 @@ fn a_journal_for_another_configuration_disables_only_the_keyring() {
         let keyring = Keyring::open(ctx.child("first"), config()).await.unwrap();
         // Opening binds even an empty journal before the first chain poll.
         drop(keyring);
-        ctx.sleep(Duration::from_millis(1)).await;
+        ctx.sleep(crate::journal::WRITER_CLOSE).await;
         let moved = Config {
             start_block: 11,
             ..config()
@@ -936,7 +936,7 @@ fn a_torn_tail_is_dropped_and_a_cut_into_synced_records_is_refused() {
         }
         let served = model(&keyring);
         drop(keyring);
-        ctx.sleep(Duration::from_millis(1)).await;
+        ctx.sleep(crate::journal::WRITER_CLOSE).await;
         let partition = format!("keyring-{}-{}_data", config().chain, config().market);
         let names = ctx.scan(&partition).await.unwrap();
         assert_eq!(names.len(), 1, "one data blob in {partition}");
@@ -956,7 +956,7 @@ fn a_torn_tail_is_dropped_and_a_cut_into_synced_records_is_refused() {
             serde_json::to_vec(&served).unwrap()
         );
         drop(reopened);
-        ctx.sleep(Duration::from_millis(1)).await;
+        ctx.sleep(crate::journal::WRITER_CLOSE).await;
         let (blob, size) = ctx.open(&partition, &names[0]).await.unwrap();
         blob.resize(size - 3).await.unwrap();
         blob.sync().await.unwrap();

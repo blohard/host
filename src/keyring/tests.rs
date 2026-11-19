@@ -1115,7 +1115,7 @@ fn verified_holdings_survive_a_transient_error_but_expire_without_progress() {
             .await
             .unwrap_err();
         assert!(
-            format!("{error:#}").contains("non-json"),
+            format!("{error:#}").contains("HTTP 503"),
             "a transport failure, retryable: {error:#}"
         );
         assert!(

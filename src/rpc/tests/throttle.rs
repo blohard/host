@@ -231,6 +231,27 @@ async fn throttle_http_and_rpc_answers_keep_size_failures_distinct() {
         (503, Some("40"), "not JSON", Some(40)),
         (503, None, "not JSON", None),
         (
+            502,
+            None,
+            r#"{"error":{"code":429,"message":"busy"}}"#,
+            Some(2),
+        ),
+        (
+            503,
+            None,
+            r#"{"error":{"code":-32005,"message":"request rate exceeded"}}"#,
+            Some(2),
+        ),
+        (
+            504,
+            Some("15"),
+            r#"{"error":{"code":429,"message":"busy"}}"#,
+            Some(15),
+        ),
+        (502, None, r#"{"message":"bad gateway"}"#, None),
+        (503, None, r#"{"message":"under maintenance"}"#, None),
+        (504, None, r#"{"message":"gateway timeout"}"#, None),
+        (
             200,
             None,
             r#"{"error":{"code":429,"message":"busy"}}"#,
@@ -272,7 +293,7 @@ async fn throttle_http_and_rpc_answers_keep_size_failures_distinct() {
                         serde_json::from_str::<Value>(body).unwrap()
                     );
                 } else {
-                    assert!(matches!(result, Err(RpcError::NotJson(_))));
+                    assert!(matches!(result, Err(RpcError::Unreachable(_))));
                 }
             }
         }

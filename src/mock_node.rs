@@ -66,7 +66,7 @@ pub struct Node {
     /// Whether eth_getBlockReceipts is served; a node without it answers
     /// "method not found".
     pub block_receipts: AtomicBool,
-    /// How many upcoming eth_getLogs requests fail outright, with a plain-text
+    /// How many upcoming eth_getLogs requests fail outright, with a JSON
     /// 503 instead of a JSON-RPC answer, as an overloaded provider does.
     pub log_outage: AtomicU64,
     /// How many upcoming eth_getLogs requests are refused with a JSON-RPC
@@ -330,7 +330,7 @@ async fn handle(State(node): State<Arc<Node>>, Json(req): Json<Value>) -> axum::
         node.log_outage.fetch_sub(1, Ordering::Relaxed);
         return (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            "upstream outage",
+            Json(json!({"message":"upstream unavailable"})),
         )
             .into_response();
     }

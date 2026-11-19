@@ -379,7 +379,7 @@ pub async fn call_as(
     .await;
     upstream.counters.of(class).count(admitted.is_err());
     let _slot = admitted?;
-    let mut resp = upstream
+    let resp = upstream
         .client
         .post(url)
         .json(&body)
@@ -393,11 +393,28 @@ pub async fn call_as(
         // Do not read a possibly large or non-JSON error body.
         return Err(upstream.pause(url, retry_after.unwrap_or(DEFAULT_COOLDOWN)));
     }
-    if resp
-        .content_length()
-        .is_some_and(|n| n > max_response as u64)
+    let status = resp.status();
+    let answer = read_answer(resp, max_response).await;
+    if answer
+        .as_ref()
+        .is_ok_and(|json| json.get("error").is_some_and(rate_throttle))
     {
-        return Err(RpcError::TooLarge(max_response));
+        return Err(upstream.pause(url, retry_after.unwrap_or(DEFAULT_COOLDOWN)));
+    }
+    if matches!(
+        status,
+        reqwest::StatusCode::BAD_GATEWAY
+            | reqwest::StatusCode::SERVICE_UNAVAILABLE
+            | reqwest::StatusCode::GATEWAY_TIMEOUT
+    ) {
+        return Err(RpcError::Unreachable(format!("HTTP {status}")));
+    }
+    answer
+}
+
+async fn read_answer(mut resp: reqwest::Response, limit: usize) -> Result<Value, RpcError> {
+    if resp.content_length().is_some_and(|n| n > limit as u64) {
+        return Err(RpcError::TooLarge(limit));
     }
     let mut buf = Vec::new();
     while let Some(chunk) = resp
@@ -405,17 +422,12 @@ pub async fn call_as(
         .await
         .map_err(|e| RpcError::Unreachable(e.without_url().to_string()))?
     {
-        if buf.len() + chunk.len() > max_response {
-            return Err(RpcError::TooLarge(max_response));
+        if buf.len() + chunk.len() > limit {
+            return Err(RpcError::TooLarge(limit));
         }
         buf.extend_from_slice(&chunk);
     }
-    let answer: Value =
-        serde_json::from_slice(&buf).map_err(|e| RpcError::NotJson(e.to_string()))?;
-    if answer.get("error").is_some_and(rate_throttle) {
-        return Err(upstream.pause(url, retry_after.unwrap_or(DEFAULT_COOLDOWN)));
-    }
-    Ok(answer)
+    serde_json::from_slice(&buf).map_err(|e| RpcError::NotJson(e.to_string()))
 }
 
 const DEFAULT_COOLDOWN: Duration = Duration::from_secs(2);

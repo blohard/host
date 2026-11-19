@@ -241,8 +241,27 @@ fn signed_post_deadlines_apply_only_to_pending_uploads() {
                 .lock()
                 .unwrap()
                 .insert("eth_getTransactionReceipt".into(), json!({"result":null}));
-            assert_eq!(upload().await.status(), 502);
+            let waiting = upload().await;
+            assert_eq!(waiting.status(), 503);
+            assert_eq!(
+                waiting.json::<Value>().await.unwrap()["code"],
+                "chain_read_unavailable"
+            );
+            assert_eq!(server.state.store.as_ref().unwrap().holding.stats(), (0, 0));
             node.response_overrides.lock().unwrap().clear();
+
+            let no_post = MockTx {
+                hash: [4; 32],
+                message_id: None,
+                ..node.txs.lock().unwrap()[0].clone()
+            };
+            node.txs.lock().unwrap().push(no_post);
+            let other = format!("chain_id=31337&tx_hash={}", hex0x(&[4; 32]));
+            let refused = publish(&server.client, &server.base, &other, body.clone()).await;
+            assert_eq!(refused.status(), 403);
+            assert_eq!(refused.json::<Value>().await.unwrap()["code"], "not_a_post");
+            assert_eq!(server.state.store.as_ref().unwrap().holding.stats(), (0, 0));
+
             assert_eq!(upload().await.status(), 200);
         },
     );

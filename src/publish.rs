@@ -311,7 +311,13 @@ async fn anchor_by_tx(
             .receipt(chain_id, tx_hash)
             .await
             .map_err(ApiError::from)?
-            .ok_or_else(|| ApiError::unavailable("mined transaction is missing its receipt"))?;
+            .ok_or_else(|| {
+                ApiError::said(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "chain_read_unavailable",
+                    "the mined transaction's receipt is not available yet",
+                )
+            })?;
         if !r.succeeded {
             return Err(ApiError::said(
                 StatusCode::FORBIDDEN,

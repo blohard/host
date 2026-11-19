@@ -250,7 +250,9 @@ answer 503. Provider throttles include `Retry-After`. None of these
 failures hold any bytes. Keep the upload and retry it unchanged after a pause.
 
 A transaction or receipt counts as missing or pending only when the RPC endpoint explicitly answers
-null. Explicit provider throttles answer 503 with `Retry-After`; other provider errors and malformed
+null. If a transaction is mined but its receipt is still null, the upload answers 503
+`chain_read_unavailable`. A successful receipt with no Board `Posted` event answers 403
+`not_a_post`. Explicit provider throttles answer 503 with `Retry-After`; other provider errors and malformed
 transaction or receipt fields answer 502. The background task
 that promotes held uploads keeps the bytes and backs off on these failures; it never takes a missing
 status or a malformed event to mean that the transaction reverted or did not post.
@@ -410,6 +412,7 @@ come after the proof:
 | `503` | `host_busy` | `the host is busy; try again shortly` | upload memory or slots, upstream concurrency or the configured RPC budget is exhausted. An upload is refused as soon as its pool's memory has no room for its next bytes, or once its bytes are in if no slot is free. Retry the same bytes/proof after backoff. |
 | `408` | `upload_too_slow` | `the upload arrived too slowly; send it again` | an upload small enough for the small pool did not arrive within ten seconds; its memory is released. Send the same bytes again. |
 | `400` | `upload_incomplete` | `the upload did not arrive in full; send it again` | the connection failed while the body was arriving |
+| `503` | `chain_read_unavailable` | `the mined transaction's receipt is not available yet` | the provider reports the transaction as mined and returns null for its receipt. The host holds no bytes. Retry the same bytes and proof after backoff. |
 | `503` | `different_held_proof` | `these bytes are held for another proof; retry after confirmation` | the record or its parent body is held under another provisional proof. The host keeps the first proof. Retry this upload once its own post is accepted. |
 | `503` | `body_not_held` | `the body is no longer held; retry the upload` | the provisional body left holding while attachment admission was in flight. Retry the same bytes/proof after backoff; no attachment slot was taken. |
 | `503` | `index_unavailable` | `the chain index is unavailable; try again shortly` | the required index is starting, backfilling or stopped; no holding slot is taken. Retain the bytes and retry once the index is ready. |

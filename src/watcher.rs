@@ -8,13 +8,13 @@
 //! pass, and a host holding thousands would spend its budget on them and keep
 //! every other upload waiting behind the answers. So a pending receipt is
 //! asked for on every pass only while the upload is fresh; after that the
-//! asking backs off per entry, up to a minute, while bodies whose message id
-//! is already known are checked against the index or the chain as before.
+//! asking backs off per entry, up to a minute, while bodies proved by message
+//! id are checked against the index or the chain as before.
 
 use crate::abi::hex0x;
 use crate::acceptance::Acceptance;
 use crate::envelope::references_within;
-use crate::holding::HeldMeta;
+use crate::holding::{HeldMeta, Proof};
 use crate::keccak::Digest;
 use crate::server::{AppState, StoreState};
 use crate::store::Kind;
@@ -45,7 +45,7 @@ pub async fn promote_at(state: &AppState, now: Instant) -> usize {
         tracing::warn!(chain = h.chain_id, hash = %h.digest.to_hex(), signer = %hex0x(&h.signer), "held upload expired without a final message; dropped");
     }
     for held in store.holding.snapshot() {
-        if state.policy.blocked(&held.signer) {
+        if held.kind == Kind::Bodies && state.policy.blocked(&held.signer) {
             drop_body(store, &held, "author blocked by host");
             continue;
         }
@@ -63,15 +63,12 @@ pub async fn promote_at(state: &AppState, now: Instant) -> usize {
         if held.kind != Kind::Bodies {
             continue; // attachments ride with their body
         }
-        if held.message_id.is_none() && !held.receipt.due(now) {
-            continue; // its receipt was missing recently; asked again later
+        if !held.receipt.due(now) || !held.acceptance.due(now) {
+            continue;
         }
-        let Some(id) = message_id_of(state, store, &held, now).await else {
+        let Some(id) = message_id_of(state, store, &mut acceptance, &held, now).await else {
             continue;
         };
-        if !held.acceptance.due(now) {
-            continue; // its acceptance lookup failed recently; asked again later
-        }
         // On a store-only host each body costs a Board read at the accepted
         // head. A body found unaccepted at this very head cannot answer
         // differently until the head moves, so it is not read again before.
@@ -86,17 +83,24 @@ pub async fn promote_at(state: &AppState, now: Instant) -> usize {
                 continue;
             }
         };
-        if block.is_some() && block == held.checked_at {
+        if matches!(held.proof, Proof::Message(_)) && block.is_some() && block == held.checked_at {
             continue;
         }
         match acceptance.accepted(held.chain_id, id).await {
-            Ok(Some(m)) if m.withdrawn => {
+            Ok(Some(m)) if m.withdrawn && m.content_hash == held.digest.0 => {
                 drop_body(store, &held, "its post has been deleted or removed")
             }
             // A failed store leaves the entry and records nothing, so the
             // next pass promotes again without waiting for a new block.
             Ok(Some(m)) if m.content_hash == held.digest.0 => {
                 promoted += promote(state, store, &held, id, now, started).await
+            }
+            // A receipt and the accepted Board read can straddle a replacement.
+            // Keep the transaction proof and ask for its canonical receipt again.
+            Ok(_) if matches!(held.proof, Proof::Transaction(_)) => {
+                store
+                    .holding
+                    .defer_receipt(held.chain_id, &held.digest, now);
             }
             Ok(Some(_)) => drop_body(
                 store,
@@ -125,51 +129,55 @@ pub async fn promote_at(state: &AppState, now: Instant) -> usize {
     promoted
 }
 
-/// The id of the message a held body names: known already, or learned from
-/// its transaction's receipt and remembered. `None` while the transaction is
-/// pending or the receipt cannot be read; a body whose transaction reverted
-/// or posted nothing is dropped here.
+/// A transaction's post number may change before confirmation. Read its receipt
+/// again after a shallow inclusion, keeping just the transaction hash in holding.
 async fn message_id_of(
     state: &AppState,
     store: &StoreState,
+    acceptance: &mut Acceptance<'_>,
     held: &HeldMeta,
     now: Instant,
 ) -> Option<u64> {
-    if let Some(id) = held.message_id {
-        return Some(id);
-    }
-    let tx = held.tx_hash?;
-    match state.verifier.receipt(held.chain_id, tx).await {
-        Ok(Some(r)) if !r.succeeded => {
-            drop_body(store, held, "its transaction reverted");
-            None
-        }
-        Ok(Some(r)) => match r.message_id {
-            Some(id) => {
-                store
-                    .holding
-                    .set_message_id(held.chain_id, &held.digest, id);
-                Some(id)
-            }
-            None => {
-                drop_body(store, held, "its transaction posted nothing");
-                None
-            }
-        },
-        Ok(None) => {
-            store
-                .holding
-                .defer_receipt(held.chain_id, &held.digest, now);
-            None // still pending
-        }
+    let tx = match held.proof {
+        Proof::Message(id) => return Some(id),
+        Proof::Transaction(tx) => tx,
+    };
+    // Sample the accepted height first. A shallow receipt could be replaced
+    // while waiting for the head that would otherwise make it look final.
+    let height = match acceptance.height(held.chain_id).await {
+        Ok(Some(height)) => height,
+        Ok(None) => return None,
         Err(e) => {
-            tracing::warn!(chain = held.chain_id, "receipt lookup failed: {e}");
+            tracing::warn!(
+                chain = held.chain_id,
+                "receipt confirmation lookup failed: {e}"
+            );
             store
                 .holding
-                .defer_receipt(held.chain_id, &held.digest, now);
-            None
+                .defer_acceptance(held.chain_id, &held.digest, now);
+            return None;
         }
+    };
+    match state.verifier.receipt(held.chain_id, tx).await {
+        Ok(Some(r)) if r.block <= height => {
+            if !r.succeeded {
+                drop_body(store, held, "its transaction reverted");
+                return None;
+            }
+            if r.message_id.is_none() {
+                drop_body(store, held, "its transaction posted nothing");
+            }
+            return r.message_id;
+        }
+        // A mined transaction may reach the accepted depth on the next pass.
+        Ok(Some(_)) => return None,
+        Ok(None) => {}
+        Err(e) => tracing::warn!(chain = held.chain_id, "receipt lookup failed: {e}"),
     }
+    store
+        .holding
+        .defer_receipt(held.chain_id, &held.digest, now);
+    None
 }
 
 /// Move one accepted body into the store, then every held attachment its bytes
@@ -261,9 +269,8 @@ fn drop_attachment(store: &StoreState, chain_id: u64, digest: &Digest, why: &str
 
 /// Drop a held body and everything held for it.
 fn drop_body(store: &StoreState, held: &HeldMeta, why: &str) {
-    store.holding.remove(held.chain_id, &held.digest);
-    for a in store.holding.attachments_of(held.chain_id, &held.digest) {
-        store.holding.remove(held.chain_id, &a.digest);
-    }
+    store
+        .holding
+        .drop_body(held.chain_id, &held.digest, held.proof);
     tracing::warn!(chain = held.chain_id, hash = %held.digest.to_hex(), "held upload dropped: {why}");
 }

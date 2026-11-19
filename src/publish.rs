@@ -12,7 +12,7 @@ use crate::abi::decode_hex;
 use crate::abi::{posted_content_hash, posted_reply_gate};
 use crate::acceptance::Acceptance;
 use crate::envelope;
-use crate::holding::{Held, HoldError};
+use crate::holding::{Held, HoldError, Proof};
 use crate::host_policy::{Policy, takedowns};
 use crate::http::ApiError;
 use crate::keccak::Digest;
@@ -170,7 +170,7 @@ async fn check_and_keep(
     if anchor.withdrawn {
         return Err(gone());
     }
-    admit(store, &state.policy, &anchor, digest, body).await
+    admit(state, store, &anchor, digest, body).await
 }
 
 /// A message's body as this host has it: stored, or merely held while its
@@ -194,7 +194,7 @@ pub(crate) async fn body_of(
 enum AnchorProof {
     Confirmed(u64),
     Included(u64),
-    Pending([u8; 32]),
+    Transaction { hash: [u8; 32], id: Option<u64> },
 }
 
 struct Anchor {
@@ -210,7 +210,7 @@ impl Anchor {
     fn message_id(&self) -> Option<u64> {
         match self.proof {
             AnchorProof::Confirmed(id) | AnchorProof::Included(id) => Some(id),
-            AnchorProof::Pending(_) => None,
+            AnchorProof::Transaction { id, .. } => id,
         }
     }
 
@@ -226,10 +226,9 @@ impl Anchor {
             kind,
             body_digest: Digest(self.body_digest),
             signer: self.author,
-            message_id: self.message_id(),
-            tx_hash: match (&self.proof, kind) {
-                (AnchorProof::Pending(tx), Kind::Bodies) => Some(*tx),
-                _ => None,
+            proof: match self.proof {
+                AnchorProof::Transaction { hash, .. } => Proof::Transaction(hash),
+                AnchorProof::Included(id) | AnchorProof::Confirmed(id) => Proof::Message(id),
             },
         }
     }
@@ -321,7 +320,19 @@ async fn anchor_by_tx(
             ));
         }
         if let Some(id) = r.message_id {
-            return anchor_by_message(state, chain_id, id).await;
+            let mut anchor = anchor_by_message(state, chain_id, id).await?;
+            if anchor.body_digest != committed {
+                return Err(ApiError::unavailable(
+                    "receipt and post disagree; retry shortly",
+                ));
+            }
+            if !anchor.is_final() {
+                anchor.proof = AnchorProof::Transaction {
+                    hash: tx_hash,
+                    id: Some(id),
+                };
+            }
+            return Ok(anchor);
         }
     }
     // Still pending, so the chain has not judged it yet. Whose post this is:
@@ -354,7 +365,10 @@ async fn anchor_by_tx(
         chain_id,
         author,
         body_digest: committed,
-        proof: AnchorProof::Pending(tx_hash),
+        proof: AnchorProof::Transaction {
+            hash: tx_hash,
+            id: None,
+        },
         // A post may be created already deleted; nothing else can change its
         // gate before it is mined.
         withdrawn: posted_reply_gate(&tx.input).is_some_and(crate::index::types::withdrawn),
@@ -364,22 +378,22 @@ async fn anchor_by_tx(
 /// The message's own body, or else an attachment of it. A body goes to the
 /// store once its message is final and waits in holding until then.
 async fn admit(
+    state: &AppState,
     store: &StoreState,
-    policy: &Policy,
     anchor: &Anchor,
     digest: Digest,
     body: bytes::Bytes,
 ) -> Result<Outcome, ApiError> {
     if anchor.body_digest != digest.0 {
-        return attach(store, policy, anchor, digest, body).await;
+        return attach(state, store, anchor, digest, body).await;
     }
     if body.len() > store.bodies.max_size() {
         return Err(ApiError::body_too_large(store.bodies.max_size()));
     }
     if anchor.is_final() {
-        persist(&store.bodies, policy, Kind::Bodies, body, digest).await
+        persist(&store.bodies, &state.policy, Kind::Bodies, body, digest).await
     } else {
-        hold(store, policy, anchor.held(Kind::Bodies, digest, body))
+        hold(state, store, anchor, Kind::Bodies, digest, body).await
     }
 }
 
@@ -387,8 +401,8 @@ async fn admit(
 /// references. The body may be stored or merely held; the attachment follows
 /// it: stored when both are accepted, held otherwise.
 async fn attach(
+    state: &AppState,
     store: &StoreState,
-    policy: &Policy,
     anchor: &Anchor,
     digest: Digest,
     bytes: bytes::Bytes,
@@ -449,21 +463,56 @@ async fn attach(
         return Err(ApiError::attachment_too_large(target.max_size()));
     }
     if anchor.is_final() && parent_stored {
-        return persist(target, policy, Kind::Attachments, bytes, digest).await;
+        return persist(target, &state.policy, Kind::Attachments, bytes, digest).await;
     }
-    hold(store, policy, anchor.held(Kind::Attachments, digest, bytes))
+    hold(state, store, anchor, Kind::Attachments, digest, bytes).await
 }
 
 /// Hold a record until its message is accepted. Like [`persist`], the last
 /// step before the bytes are kept, so it checks the takedown list itself:
 /// whatever the upload waited on before, nothing taken down is kept.
-fn hold(store: &StoreState, policy: &Policy, held: Held) -> Result<Outcome, ApiError> {
-    if policy.taken_down(&held.digest.0) {
+async fn hold(
+    state: &AppState,
+    store: &StoreState,
+    anchor: &Anchor,
+    kind: Kind,
+    digest: Digest,
+    bytes: bytes::Bytes,
+) -> Result<Outcome, ApiError> {
+    let mut held = anchor.held(kind, digest, bytes);
+    match anchor.proof {
+        AnchorProof::Confirmed(id) | AnchorProof::Included(id) => {
+            if let Some(Proof::Transaction(hash)) =
+                store.holding.body_proof(held.chain_id, &held.body_digest)
+                && state
+                    .verifier
+                    .receipt(held.chain_id, hash)
+                    .await?
+                    .is_some_and(|r| r.succeeded && r.message_id == Some(id))
+            {
+                held.proof = Proof::Transaction(hash);
+            }
+        }
+        AnchorProof::Transaction { hash, id: Some(id) } => {
+            store
+                .holding
+                .bind_transaction(held.chain_id, &held.body_digest, id, hash);
+        }
+        AnchorProof::Transaction { id: None, .. } => {}
+    }
+    if state.policy.taken_down(&digest.0) {
         return Err(takedowns::refused());
     }
-    let (kind, message_id) = (held.kind, held.message_id);
     match store.holding.insert(held) {
-        Ok(_) => Ok(Outcome::Held { kind, message_id }),
+        Ok(_) => Ok(Outcome::Held {
+            kind,
+            message_id: anchor.message_id(),
+        }),
+        Err(e @ HoldError::DifferentProof) => Err(ApiError::said(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "different_held_proof",
+            e.to_string(),
+        )),
         Err(e @ HoldError::BodyNotHeld) => Err(ApiError::said(
             StatusCode::SERVICE_UNAVAILABLE,
             "body_not_held",

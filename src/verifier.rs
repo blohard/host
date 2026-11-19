@@ -145,6 +145,7 @@ pub struct TxInfo {
 /// A mined transaction's outcome (`eth_getTransactionReceipt`).
 #[derive(Debug, Clone)]
 pub struct ReceiptInfo {
+    pub block: u64,
     pub succeeded: bool,
     /// The id from the board's `Posted` event, if this transaction posted.
     pub message_id: Option<u64>,
@@ -605,6 +606,7 @@ impl Verifier {
                 _ => None,
             });
             Ok(ReceiptInfo {
+                block: receipt.block,
                 succeeded: receipt.succeeded,
                 message_id,
             })

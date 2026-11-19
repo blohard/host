@@ -131,9 +131,8 @@ fn malformed_receipts_keep_held_uploads() {
                 bytes,
                 kind,
                 body_digest: body_hash,
-                tx_hash: Some([7; 32]),
+                proof: crate::holding::Proof::Transaction([7; 32]),
                 signer: [1; 20],
-                message_id: None,
             };
             store
                 .holding
@@ -177,6 +176,7 @@ fn malformed_receipts_keep_held_uploads() {
                 bad["result"]["logs"][0][field] = value;
                 answers.push(bad);
             }
+            crate::index::follow::once(&state).await;
             let start = std::time::Instant::now();
             let receipt_url = format!("{base}/api/chains/31337/transaction/{}", hex0x(&[7; 32]));
             for (i, answer) in answers.iter().enumerate() {
@@ -185,8 +185,10 @@ fn malformed_receipts_keep_held_uploads() {
                     .lock()
                     .unwrap()
                     .insert("eth_getTransactionReceipt".into(), answer.clone());
+                let before = node.node.count("eth_getTransactionReceipt");
                 crate::watcher::promote_at(&state, start + Duration::from_secs(i as u64 * 61))
                     .await;
+                assert_eq!(node.node.count("eth_getTransactionReceipt"), before + 1);
                 assert_eq!(
                     store.holding.stats().0,
                     2,
@@ -224,7 +226,6 @@ fn malformed_receipts_keep_held_uploads() {
                 }
             }
             node.node.response_overrides.lock().unwrap().clear();
-            crate::index::follow::once(&state).await;
             assert_eq!(
                 crate::watcher::promote_at(
                     &state,
@@ -320,9 +321,8 @@ fn attachments_arriving_during_promotion_survive_completion_or_cancellation() {
                     bytes,
                     kind,
                     body_digest: body_hash,
-                    tx_hash: None,
+                    proof: crate::holding::Proof::Message(1),
                     signer: [1; 20],
-                    message_id: Some(1),
                 };
                 store
                     .holding

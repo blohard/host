@@ -107,3 +107,232 @@ fn a_pending_receipt_is_asked_for_less_and_less_while_others_promote() {
         },
     );
 }
+
+fn renumbered_post(was_mined_at_upload: bool) {
+    let body = record("text/plain", b"good morning");
+    let label = if was_mined_at_upload {
+        "held-mined"
+    } else {
+        "held-pending"
+    };
+    with_server(
+        label,
+        Some(Node {
+            head: 15.into(),
+            messages: 4.into(),
+            extra: vec![(3, body.clone()), (4, body.clone())],
+            ..Node::new(31337, CONTRACT, b"other".to_vec())
+        }),
+        |url| Setup {
+            gateway: false,
+            verifier: chain_verifier(
+                url.unwrap(),
+                ChainConfig {
+                    confirmations: 5,
+                    ..ChainConfig::for_test(31337, "", CONTRACT)
+                },
+            ),
+            ..Setup::default()
+        },
+        move |Server {
+                  base,
+                  client,
+                  state,
+                  node,
+              }| async move {
+            let node = node.unwrap();
+            let tx = [1; 32];
+            pending_tx(&node, tx, &body);
+            if was_mined_at_upload {
+                node.node.mine_tx(tx, 14, 4);
+            }
+            let proof = format!("chain_id=31337&tx_hash={}", hex0x(&tx));
+            let response = publish(&client, &base, &proof, body.clone()).await;
+            assert_eq!(response.status(), 202);
+            let answer: Value = response.json().await.unwrap();
+            assert_eq!(
+                answer["message_id"],
+                json!(was_mined_at_upload.then_some(4))
+            );
+            let start = Instant::now();
+            for seconds in [0, 3, 6, 9, 12] {
+                if seconds == 9 && !was_mined_at_upload {
+                    node.node.mine_tx(tx, 14, 4);
+                }
+                assert_eq!(
+                    promote_at(&state, start + Duration::from_secs(seconds)).await,
+                    0
+                );
+            }
+
+            // The canonical history has only three posts. The transaction is now #3.
+            node.node.mine_tx(tx, 13, 3);
+            node.node.set_messages(3);
+            node.node.set_head(18);
+            assert_eq!(promote_at(&state, start + Duration::from_secs(15)).await, 1);
+            assert_eq!(
+                state
+                    .store
+                    .as_ref()
+                    .unwrap()
+                    .bodies
+                    .get(&keccak::hash(&[&body]))
+                    .await
+                    .unwrap(),
+                Some(body)
+            );
+        },
+    );
+}
+
+#[test]
+fn a_pending_upload_follows_its_reincluded_transaction() {
+    renumbered_post(false);
+}
+
+#[test]
+fn a_mined_upload_follows_its_reincluded_transaction() {
+    renumbered_post(true);
+}
+
+#[test]
+fn a_second_pending_proof_for_the_same_bytes_is_retryable() {
+    let body = record("text/plain", b"same text");
+    with_server(
+        "held-different-proof",
+        Some(Node {
+            head: 15.into(),
+            messages: 1.into(),
+            ..Node::new(31337, CONTRACT, body.clone())
+        }),
+        |url| Setup {
+            gateway: false,
+            verifier: chain_verifier(
+                url.unwrap(),
+                ChainConfig {
+                    confirmations: 5,
+                    ..ChainConfig::for_test(31337, "", CONTRACT)
+                },
+            ),
+            ..Setup::default()
+        },
+        move |Server {
+                  base,
+                  client,
+                  state,
+                  node,
+              }| async move {
+            let node = node.unwrap();
+            let submit = |tx: u8| {
+                let proof = format!("chain_id=31337&tx_hash={}", hex0x(&[tx; 32]));
+                let bytes = body.clone();
+                let (client, base) = (&client, &base);
+                async move { publish(client, base, &proof, bytes).await }
+            };
+            pending_tx(&node, [1; 32], &body);
+            pending_tx(&node, [2; 32], &body);
+            assert_eq!(submit(1).await.status(), 202);
+            assert_eq!(submit(1).await.status(), 202);
+            let other = submit(2).await;
+            assert_eq!(other.status(), 503);
+            assert_eq!(
+                other.json::<Value>().await.unwrap()["code"],
+                "different_held_proof"
+            );
+            assert_eq!(state.store.as_ref().unwrap().holding.stats().0, 1);
+            node.node.mine_tx([2; 32], 11, 1);
+            node.node.set_head(16);
+            assert_eq!(submit(2).await.status(), 200);
+        },
+    );
+}
+
+#[test]
+fn a_late_image_and_body_retry_can_name_the_post_by_number_or_transaction() {
+    for number_first in [false, true] {
+        let image = record("image/png", b"late image");
+        let body = record(
+            "text/plain",
+            format!("![image](record:{})", hx(&image)).as_bytes(),
+        );
+        with_server(
+            if number_first {
+                "held-number-first"
+            } else {
+                "held-tx-first"
+            },
+            Some(Node {
+                head: 15.into(),
+                messages: 2.into(),
+                extra: vec![(2, body.clone())],
+                ..Node::new(31337, CONTRACT, body.clone())
+            }),
+            |url| Setup {
+                gateway: false,
+                verifier: chain_verifier(
+                    url.unwrap(),
+                    ChainConfig {
+                        confirmations: 5,
+                        ..ChainConfig::for_test(31337, "", CONTRACT)
+                    },
+                ),
+                ..Setup::default()
+            },
+            move |Server {
+                      base,
+                      client,
+                      state,
+                      node,
+                  }| async move {
+                let node = node.unwrap();
+                let tx = [1; 32];
+                let hash = format!("chain_id=31337&tx_hash={}", hex0x(&tx));
+                let number = "chain_id=31337&message_id=1";
+                let other = "chain_id=31337&message_id=2";
+                pending_tx(&node, tx, &body);
+                if number_first {
+                    node.node.mine_tx(tx, 11, 1);
+                    assert_eq!(
+                        publish(&client, &base, number, body.clone()).await.status(),
+                        202
+                    );
+                } else {
+                    assert_eq!(
+                        publish(&client, &base, &hash, body.clone()).await.status(),
+                        202
+                    );
+                    node.node.mine_tx(tx, 11, 1);
+                }
+                let retry = if number_first { hash.as_str() } else { number };
+                assert_eq!(
+                    publish(&client, &base, retry, body.clone()).await.status(),
+                    202
+                );
+                assert_eq!(
+                    publish(&client, &base, other, image.clone()).await.status(),
+                    503
+                );
+                node.node.set_head(16);
+                assert_eq!(
+                    publish(&client, &base, number, image.clone())
+                        .await
+                        .status(),
+                    202
+                );
+                assert_eq!(promote_at(&state, Instant::now()).await, 2);
+                let target = &state
+                    .store
+                    .as_ref()
+                    .unwrap()
+                    .attachments
+                    .as_ref()
+                    .unwrap()
+                    .0;
+                assert_eq!(
+                    target.get(&keccak::hash(&[&image])).await.unwrap(),
+                    Some(image)
+                );
+            },
+        );
+    }
+}

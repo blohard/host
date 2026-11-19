@@ -50,6 +50,13 @@ impl Default for HoldingConfig {
     }
 }
 
+/// The proof that must be confirmed before these bytes can be served.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Proof {
+    Message(u64),
+    Transaction([u8; 32]),
+}
+
 /// A record handed to the holding area.
 #[derive(Debug, Clone)]
 pub struct Held {
@@ -59,12 +66,9 @@ pub struct Held {
     pub kind: Kind,
     /// The body this record belongs to (itself, for a body).
     pub body_digest: Digest,
-    /// The transaction that anchors the body, when known before the receipt.
-    pub tx_hash: Option<[u8; 32]>,
+    pub proof: Proof,
     /// The authenticated post author, charged against the per-signer cap.
     pub signer: [u8; 20],
-    /// Known once the receipt (or the chain at `latest`) names it.
-    pub message_id: Option<u64>,
 }
 
 /// A held record without its bytes: what the watcher reads on every pass
@@ -77,10 +81,9 @@ pub struct HeldMeta {
     /// How many bytes the record is.
     pub len: usize,
     pub kind: Kind,
-    pub tx_hash: Option<[u8; 32]>,
+    pub proof: Proof,
     pub signer: [u8; 20],
-    pub message_id: Option<u64>,
-    /// When it arrived.
+    /// When the holding period for this body and its attachments began.
     pub since: Instant,
     /// Asking for its transaction's receipt.
     pub receipt: Backoff,
@@ -142,20 +145,33 @@ pub enum HoldError {
     /// Promotion (or expiry) removed the body while this attachment's
     /// admission was in flight. Retry against the body's current state.
     BodyNotHeld,
+    DifferentProof,
     /// The area holds its maximum bytes; the client should retry once its
     /// message is accepted.
-    Full { max_bytes: usize },
+    Full {
+        max_bytes: usize,
+    },
     /// The area holds its maximum number of records; likewise.
-    TooManyEntries { max_entries: usize },
+    TooManyEntries {
+        max_entries: usize,
+    },
     /// This signer already has as many held records as allowed.
-    TooManyForSigner { max: usize },
+    TooManyForSigner {
+        max: usize,
+    },
     /// This signer already has as many held bytes as allowed.
-    TooManyBytesForSigner { max_bytes: usize },
+    TooManyBytesForSigner {
+        max_bytes: usize,
+    },
 }
 
 impl fmt::Display for HoldError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::DifferentProof => write!(
+                f,
+                "these bytes are held for another proof; retry after confirmation"
+            ),
             Self::BodyNotHeld => write!(f, "the body is no longer held; retry the upload"),
             Self::Full { max_bytes } => write!(
                 f,
@@ -195,9 +211,8 @@ impl Entry {
             digest: h.digest,
             len: h.bytes.len(),
             kind: h.kind,
-            tx_hash: h.tx_hash,
+            proof: h.proof,
             signer: h.signer,
-            message_id: h.message_id,
             since: self.since,
             receipt: self.receipt,
             checked_at: self.checked_at,
@@ -234,8 +249,7 @@ impl Holding {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Hold a record, timestamped now. Idempotent by (chain, digest): a
-    /// duplicate returns `Ok(false)` without counting against any cap.
+    /// Hold a record under one proof. Retrying it takes no additional capacity.
     pub fn insert(&self, mut held: Held) -> Result<bool, HoldError> {
         // The caps count length, so nothing is kept with spare capacity, as
         // an upload's buffer can have. A boxed slice is exactly its length.
@@ -244,16 +258,29 @@ impl Holding {
             .into_vec();
         let mut g = self.lock();
         let key = (held.chain_id, held.digest);
-        if g.entries.contains_key(&key) {
-            return Ok(false);
-        }
-        if held.kind == Kind::Attachments
-            && !g
+        let since = if held.kind == Kind::Attachments {
+            let body = g
                 .entries
                 .get(&(held.chain_id, held.body_digest))
-                .is_some_and(|entry| entry.held.kind == Kind::Bodies)
-        {
-            return Err(HoldError::BodyNotHeld);
+                .filter(|e| e.held.kind == Kind::Bodies)
+                .ok_or(HoldError::BodyNotHeld)?;
+            if body.held.proof != held.proof {
+                return Err(HoldError::DifferentProof);
+            }
+            // An attachment cannot outlive the proof that will promote it.
+            body.since
+        } else {
+            Instant::now()
+        };
+        if let Some(entry) = g.entries.get(&key) {
+            return if entry.held.proof == held.proof
+                && entry.held.kind == held.kind
+                && entry.held.body_digest == held.body_digest
+            {
+                Ok(false)
+            } else {
+                Err(HoldError::DifferentProof)
+            };
         }
         if g.bytes + held.bytes.len() > self.cfg.max_bytes {
             return Err(HoldError::Full {
@@ -289,13 +316,41 @@ impl Holding {
             key,
             Entry {
                 held,
-                since: Instant::now(),
+                since,
                 receipt: Backoff::new(Instant::now()),
                 checked_at: None,
                 acceptance: Backoff::new(Instant::now()),
             },
         );
         Ok(true)
+    }
+
+    /// The proof a held body will follow, without cloning its bytes.
+    pub fn body_proof(&self, chain: u64, body: &Digest) -> Option<Proof> {
+        self.lock()
+            .entries
+            .get(&(chain, *body))
+            .filter(|entry| entry.held.kind == Kind::Bodies)
+            .map(|entry| entry.held.proof)
+    }
+
+    /// A fresh receipt links this post number to its transaction. Keep the
+    /// transaction for the whole group so a shallow reorg can renumber it.
+    pub fn bind_transaction(&self, chain: u64, body: &Digest, id: u64, hash: [u8; 32]) {
+        let mut g = self.lock();
+        if !g
+            .entries
+            .get(&(chain, *body))
+            .is_some_and(|e| e.held.kind == Kind::Bodies && e.held.proof == Proof::Message(id))
+        {
+            return;
+        }
+        for e in g.entries.values_mut() {
+            if e.held.chain_id == chain && e.held.body_digest == *body {
+                e.held.proof = Proof::Transaction(hash);
+                e.checked_at = None;
+            }
+        }
     }
 
     /// A copy of one record, bytes included.
@@ -312,6 +367,22 @@ impl Holding {
         let entry = g.entries.remove(&(chain_id, *digest))?;
         g.bytes -= entry.held.bytes.len();
         Some(entry.held)
+    }
+
+    /// Release a body and its attachments before a new proof can claim its hash.
+    pub fn drop_body(&self, chain_id: u64, digest: &Digest, proof: Proof) {
+        let mut g = self.lock();
+        let mut removed = 0;
+        g.entries.retain(|_, e| {
+            let drop = e.held.chain_id == chain_id
+                && e.held.body_digest == *digest
+                && e.held.proof == proof;
+            if drop {
+                removed += e.held.bytes.len();
+            }
+            !drop
+        });
+        g.bytes -= removed;
     }
 
     /// Finish promotion only after every attachment has left holding. The
@@ -331,16 +402,6 @@ impl Holding {
             g.bytes -= entry.held.bytes.len();
         }
         true
-    }
-
-    /// Every record of a body (the body and its attachments) learns the id.
-    pub fn set_message_id(&self, chain_id: u64, body_digest: &Digest, message_id: u64) {
-        let mut g = self.lock();
-        for e in g.entries.values_mut() {
-            if e.held.chain_id == chain_id && e.held.body_digest == *body_digest {
-                e.held.message_id = Some(message_id);
-            }
-        }
     }
 
     /// The receipt for this body's transaction was asked for at `now` and was
@@ -439,9 +500,8 @@ mod tests {
             bytes: bytes.to_vec(),
             kind: Kind::Bodies,
             body_digest: digest,
-            tx_hash: None,
+            proof: Proof::Message(1),
             signer: [signer; 20],
-            message_id: None,
         }
     }
 
@@ -493,6 +553,63 @@ mod tests {
         // Opposite ordering: completion wins before the upload's insert.
         assert_eq!(h.insert(attachment(b"later")), Err(HoldError::BodyNotHeld));
         assert_eq!(h.stats(), (0, 0), "a refused upload consumes no capacity");
+    }
+
+    #[test]
+    fn a_shared_attachment_waits_on_its_own_post_proof() {
+        let h = Holding::new(HoldingConfig::default());
+        let first = held(1, b"first", 1);
+        let second = Held {
+            proof: Proof::Message(2),
+            ..held(1, b"second", 2)
+        };
+        let image = |body: &Held| Held {
+            kind: Kind::Attachments,
+            proof: body.proof,
+            body_digest: body.digest,
+            ..held(1, b"same picture", body.signer[0])
+        };
+        h.insert(first.clone()).unwrap();
+        h.insert(second.clone()).unwrap();
+        assert_eq!(
+            h.insert(Held {
+                proof: second.proof,
+                ..image(&first)
+            }),
+            Err(HoldError::DifferentProof)
+        );
+        assert_eq!(h.insert(image(&first)), Ok(true));
+        assert_eq!(h.insert(image(&first)), Ok(false));
+        assert_eq!(h.insert(image(&second)), Err(HoldError::DifferentProof));
+        let body = h
+            .snapshot()
+            .into_iter()
+            .find(|h| h.digest == first.digest)
+            .unwrap();
+        assert_eq!(h.attachments_of(1, &first.digest)[0].since, body.since);
+        h.drop_body(1, &first.digest, first.proof);
+        assert_eq!(h.stats(), (1, second.bytes.len()));
+        assert_eq!(h.insert(image(&second)), Ok(true));
+    }
+
+    #[test]
+    fn a_numbered_snapshot_cannot_drop_a_body_after_its_transaction_is_known() {
+        let h = Holding::new(HoldingConfig::default());
+        let body = held(1, b"body", 1);
+        let image = Held {
+            kind: Kind::Attachments,
+            body_digest: body.digest,
+            ..held(1, b"image", 1)
+        };
+        h.insert(body.clone()).unwrap();
+        h.insert(image.clone()).unwrap();
+        h.bind_transaction(1, &body.digest, 1, [7; 32]);
+        h.drop_body(1, &body.digest, body.proof);
+        let proof = Proof::Transaction([7; 32]);
+        assert_eq!(h.body_proof(1, &body.digest), Some(proof));
+        assert_eq!(h.insert(Held { proof, ..image }), Ok(false));
+        h.drop_body(1, &body.digest, proof);
+        assert_eq!(h.stats(), (0, 0));
     }
 
     #[test]
@@ -593,7 +710,7 @@ mod tests {
     }
 
     #[test]
-    fn expiry_and_message_ids() {
+    fn expiry_and_attachment_lookup() {
         let h = Holding::new(HoldingConfig {
             ttl: Duration::from_secs(10),
             ..HoldingConfig::default()
@@ -610,16 +727,12 @@ mod tests {
         assert_eq!(expired[0].digest, old_digest);
         assert_eq!(h.stats(), (0, 0));
 
-        // An attachment learns the id along with its body, and `get` still
-        // hands back the bytes.
         h.insert(held(1, b"new", 1)).unwrap();
         let body = keccak::hash(&[b"new"]);
         let mut att = held(1, b"att", 1);
         att.kind = Kind::Attachments;
         att.body_digest = body;
         h.insert(att).unwrap();
-        h.set_message_id(1, &body, 42);
-        assert!(h.snapshot().iter().all(|x| x.message_id == Some(42)));
         assert_eq!(h.attachments_of(1, &body).len(), 1);
         assert_eq!(h.get(1, &body).unwrap().bytes, b"new");
         assert!(h.get(2, &body).is_none());

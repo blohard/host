@@ -270,12 +270,20 @@ One open issue: a pending `postBySig` is charged to the author its signature nam
 signature is public calldata once the post is mined, so a stranger's transactions that carry an
 author's old signed posts, if a provider reports them as pending, count against that author until
 they expire. Whether a Base provider ever reports such a transaction as pending is unverified. A
-held upload is dropped if its transaction reverts, if it does not match, or when it expires.
+held transaction is tracked by hash until its receipt reaches the accepted depth. If the post
+number changes before then, promotion follows the new receipt. A final receipt that reverted or
+posted no message drops the held body and its attachments. The watcher also drops a body if its
+numbered proof commits to different bytes, its post is withdrawn, its author is blocked, or its
+holding period expires. A takedown drops the named record and, for a body, its held attachments.
 
-On a store-only host, each held body costs one Board read per new accepted head. A body found not
-yet accepted is not read again until the accepted head moves, and a failed read backs that body off
-from six seconds up to a minute, so a host full of held bodies does not spend a call on each one
-every pass. A gateway reads its index instead.
+On a store-only host, a body held by message id is checked against the Board at the accepted
+head. If the message is absent, the watcher waits for the head to move before checking again.
+For a body held by transaction hash, the watcher checks its receipt before reading the Board.
+Missing receipts are checked every pass for the first ten seconds, then with a growing delay
+capped at a minute. Once a receipt is seen, a shallow inclusion is checked again on the next
+pass. Failed message lookups back off from six seconds to one minute. A gateway uses its index
+for the accepted height and message. An attachment expires with the
+body whose proof it shares.
 
 Size limits for bodies and attachments apply before bytes are held as well as before they are
 stored. When a held body is promoted, the host keeps holding it while its attachments are still
@@ -358,9 +366,12 @@ dropped after a revert, or be lost on restart.
 
 `message_id` is the id the host has learned so far, or `null` while the transaction is pending.
 
-Publishing the same bytes again is harmless: they always produce the same hash, and nothing changes
-after the first time. Publishing again, with the same or a different valid proof, returns `200` with
-`"stored": false`, or `202` again while the record is still held. Refused uploads write nothing. A
+Once stored, the same bytes under any accepted proof return `200` with `"stored": false`.
+While provisional, a retry for the same role, body and proof returns `202` again. A post number
+and a transaction hash count as the same proof when the receipt links them. The host tracks
+one proof per held hash on each chain. If the bytes or their parent body are held under another
+proof, the upload returns `503 different_held_proof`. Keep the bytes and retry after confirmation.
+This also applies to an image shared by two pending posts. Refused uploads write nothing. A
 lost answer or a request timeout can follow a completed write, so retry with the same bytes and
 proof. A store I/O error leaves that store unavailable until restart, and does not mean the write
 completed.
@@ -398,6 +409,7 @@ come after the proof:
 | `503` | `host_busy` | `the host is busy; try again shortly` | upload memory or slots, upstream concurrency or the configured RPC budget is exhausted. An upload is refused as soon as its pool's memory has no room for its next bytes, or once its bytes are in if no slot is free. Retry the same bytes/proof after backoff. |
 | `408` | `upload_too_slow` | `the upload arrived too slowly; send it again` | an upload small enough for the small pool did not arrive within ten seconds; its memory is released. Send the same bytes again. |
 | `400` | `upload_incomplete` | `the upload did not arrive in full; send it again` | the connection failed while the body was arriving |
+| `503` | `different_held_proof` | `these bytes are held for another proof; retry after confirmation` | the record or its parent body is held under another provisional proof. The host keeps the first proof. Retry this upload once its own post is accepted. |
 | `503` | `body_not_held` | `the body is no longer held; retry the upload` | the provisional body left holding while attachment admission was in flight. Retry the same bytes/proof after backoff; no attachment slot was taken. |
 | `503` | `index_unavailable` | `the chain index is unavailable; try again shortly` | the required index is starting, backfilling or stopped; no holding slot is taken. Retain the bytes and retry once the index is ready. |
 | `500` | `store_failed` | `the content store failed; try again shortly` | the write failed and the store is unavailable until restart; the detail is logged server-side |

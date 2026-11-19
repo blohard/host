@@ -40,6 +40,16 @@ impl<'a> Acceptance<'a> {
         .map(Some)
     }
 
+    /// The height through which this host accepts receipts.
+    pub async fn height(&mut self, chain: u64) -> Result<Option<u64>, VerifyError> {
+        match self.confirmed(chain).await? {
+            Some(head) => Ok(Some(head)),
+            None => self
+                .state
+                .read_index(chain, |m| m.at.checkpoint.map(|c| c.block)),
+        }
+    }
+
     /// Accepted facts only. Absence is retryable; unavailability is an error.
     pub async fn accepted(
         &mut self,

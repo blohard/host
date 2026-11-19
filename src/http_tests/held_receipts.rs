@@ -336,3 +336,91 @@ fn a_late_image_and_body_retry_can_name_the_post_by_number_or_transaction() {
         );
     }
 }
+
+#[test]
+fn a_deep_receipt_naming_different_bytes_keeps_the_upload() {
+    let body = record("text/plain", b"good morning");
+    with_server(
+        "held-conflicting-receipt",
+        Some(Node {
+            head: 13.into(),
+            messages: 3.into(),
+            extra: vec![(3, body.clone())],
+            ..Node::new(31337, CONTRACT, record("text/plain", b"another post"))
+        }),
+        |url| Setup {
+            gateway: false,
+            ..follow_fixtures::setup(url)
+        },
+        move |Server {
+                  base,
+                  client,
+                  state,
+                  node,
+              }| async move {
+            let node = node.unwrap();
+            let tx = [1; 32];
+            pending_tx(&node, tx, &body);
+            let proof = format!("chain_id=31337&tx_hash={}", hex0x(&tx));
+            let digest = keccak::hash(&[&body]);
+            assert_eq!(
+                publish(&client, &base, &proof, body.clone()).await.status(),
+                202
+            );
+
+            // The receipt points to accepted post 1, which commits to other bytes.
+            node.node.mine_tx(tx, 11, 1);
+            let start = Instant::now();
+            let store = state.store.as_ref().unwrap();
+            assert_eq!(promote_at(&state, start).await, 0);
+            assert_eq!(store.holding.stats().0, 1);
+            assert!(!store.bodies.has(&digest).await.unwrap());
+
+            node.node.mine_tx(tx, 13, 3);
+            node.node.set_head(15);
+            assert_eq!(promote_at(&state, start + Duration::from_secs(3)).await, 1);
+            assert_eq!(store.bodies.get(&digest).await.unwrap(), Some(body));
+        },
+    );
+}
+
+#[test]
+fn a_mined_upload_promotes_on_the_first_pass_after_the_index_catches_up() {
+    let body = record("text/plain", b"good morning");
+    with_server(
+        "held-index-depth",
+        Some(Node {
+            head: 12.into(),
+            messages: 0.into(),
+            ..Node::new(31337, CONTRACT, body.clone())
+        }),
+        follow_fixtures::setup,
+        move |Server {
+                  base,
+                  client,
+                  state,
+                  node,
+              }| async move {
+            let node = node.unwrap();
+            crate::index::follow::once(&state).await;
+            let tx = [1; 32];
+            pending_tx(&node, tx, &body);
+            let proof = format!("chain_id=31337&tx_hash={}", hex0x(&tx));
+            assert_eq!(publish(&client, &base, &proof, body).await.status(), 202);
+
+            // Block 11 is two deep on the node, but the index is still at block 10.
+            node.node.mine_tx(tx, 11, 1);
+            node.node.set_messages(1);
+            node.node.set_head(13);
+            let start = Instant::now();
+            for seconds in [0, 3, 6, 9, 12] {
+                assert_eq!(
+                    promote_at(&state, start + Duration::from_secs(seconds)).await,
+                    0
+                );
+            }
+            crate::index::follow::once(&state).await;
+            assert_eq!(promote_at(&state, start + Duration::from_secs(15)).await, 1);
+        },
+    );
+}

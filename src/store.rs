@@ -102,6 +102,8 @@ pub struct ContentStore<E: Context + Spawner> {
     inner: Arc<RwLock<Option<Inner<E>>>>,
     /// Largest value this store accepts.
     max_size: usize,
+    #[cfg(test)]
+    pub value_reads: std::sync::atomic::AtomicUsize,
 }
 
 impl<E: Context + Spawner> ContentStore<E> {
@@ -166,6 +168,8 @@ impl<E: Context + Spawner> ContentStore<E> {
                 dirty: false,
             }))),
             max_size,
+            #[cfg(test)]
+            value_reads: Default::default(),
         })
     }
 
@@ -213,8 +217,24 @@ impl<E: Context + Spawner> ContentStore<E> {
         self.max_size
     }
 
+    /// Check the key index without reading the stored bytes.
+    pub async fn has(&self, digest: &Digest) -> Result<bool> {
+        let guard = self.inner.read().await;
+        let inner = guard
+            .as_ref()
+            .context("store poisoned by earlier failure")?;
+        inner
+            .freezer
+            .has(digest)
+            .await
+            .map_err(|e| anyhow!("lookup failed: {e:?}"))
+    }
+
     /// Fetch content by its keccak-256 digest.
     pub async fn get(&self, digest: &Digest) -> Result<Option<Vec<u8>>> {
+        #[cfg(test)]
+        self.value_reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let guard = self.inner.read().await;
         let inner = guard
             .as_ref()

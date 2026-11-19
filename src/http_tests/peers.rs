@@ -54,6 +54,7 @@ fn pulls_missing_records_from_peers() {
             // No hint: a miss is a miss, and no peer is bothered.
             let resp = client
                 .get(format!("{base}/api/content/{body_hash}"))
+                .header("If-None-Match", "*")
                 .send()
                 .await
                 .unwrap();
@@ -81,16 +82,23 @@ fn pulls_missing_records_from_peers() {
             assert_eq!(resp.status(), 200);
             assert_eq!(peer.total_hits(), 1);
 
-            // The attachment the body references follows the same way.
+            // A conditional miss still pulls and verifies the attachment.
             let resp = client
                 .get(format!(
                     "{base}/api/content/{att_hash}?chain_id=31337&message_id=1"
                 ))
+                .header("If-None-Match", "*")
                 .send()
                 .await
                 .unwrap();
-            let status = resp.status();
-            assert_eq!(status, 200, "{}", resp.text().await.unwrap());
+            assert_eq!(resp.status(), 304);
+            let resp = client
+                .get(format!("{base}/api/content/{att_hash}"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 200);
+            assert_eq!(resp.bytes().await.unwrap().as_ref(), att.as_slice());
             assert_eq!(peer.total_hits(), 2);
 
             // A hash the chain does not vouch for is never asked about.
@@ -559,6 +567,13 @@ fn a_hinted_miss_on_a_store_only_host_spends_the_readers_live_budget() {
                 .put(body.clone())
                 .await
                 .unwrap();
+            let bodies = &state.store.as_ref().unwrap().bodies;
+            let reads = || {
+                bodies
+                    .value_reads
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            };
+            let before_reads = reads();
             let before = chain_calls();
             for _ in 0..40 {
                 assert_eq!(
@@ -569,6 +584,26 @@ fn a_hinted_miss_on_a_store_only_host_spends_the_readers_live_budget() {
                     200
                 );
             }
+            assert_eq!(
+                reads() - before_reads,
+                40,
+                "one value read per ordinary hit"
+            );
+            let response = client
+                .get(format!(
+                    "{base}/api/content/{body_hash}?chain_id=31337&message_id=7"
+                ))
+                .header("if-none-match", "*")
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 304);
+            assert!(response.bytes().await.unwrap().is_empty());
+            assert_eq!(
+                reads() - before_reads,
+                40,
+                "a conditional hit reads only the key index"
+            );
             assert_eq!(chain_calls(), before);
         },
     );

@@ -151,8 +151,6 @@ const CONTENT_CACHE: &str = "public, max-age=300, must-revalidate";
 /// to that work: a host with an index vouches for the record from it, one
 /// without peers fetches nothing, and a record this host has, a request
 /// naming no message, a taken-down hash or a malformed request asks nobody.
-/// A request admitted here reads the store again in the handler: a local
-/// read, next to the chain and peers it guards.
 pub async fn asks_the_chain(request: &mut axum::extract::Request, state: &AppState) -> bool {
     use axum::RequestExt as _;
     if state.gateway.is_some() || !crate::index::Host::has_peers(state) {
@@ -174,7 +172,17 @@ pub async fn asks_the_chain(request: &mut axum::extract::Request, state: &AppSta
         return false;
     }
     // A store read failing is the handler's to report, free.
-    matches!(from_store(store, &digest).await, Ok(None))
+    matches!(has_record(store, &digest).await, Ok(false))
+}
+
+async fn has_record(store: &StoreState, digest: &Digest) -> anyhow::Result<bool> {
+    if store.bodies.has(digest).await? {
+        return Ok(true);
+    }
+    match &store.attachments {
+        Some((attachments, _)) => attachments.has(digest).await,
+        None => Ok(false),
+    }
 }
 
 /// The record `digest` from this host's store: bodies first, then
@@ -210,7 +218,28 @@ pub async fn content(
     let Some(store) = state.store.as_ref() else {
         return json_said(StatusCode::NOT_FOUND, "no_store", NO_STORE);
     };
-    let mut found = match from_store(store, &digest).await {
+    // The hash names the bytes, so it is their ETag. A cache asking again
+    // gets 304 only for a record this host still serves.
+    let etag = format!("\"{}\"", digest.to_hex());
+    let revalidated = headers
+        .get_all(header::IF_NONE_MATCH)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .any(|tag| {
+            let tag = tag.trim();
+            tag == "*" || tag.trim_start_matches("W/") == etag
+        });
+    let local = if revalidated {
+        has_record(store, &digest)
+            .await
+            .map(|found| found.then(|| StatusCode::NOT_MODIFIED.into_response()))
+    } else {
+        from_store(store, &digest)
+            .await
+            .map(|bytes| bytes.map(|b| content_response(b.into())))
+    };
+    let mut found = match local {
         Ok(v) => v,
         Err(e) => return ApiError::store_failed(e).into_response(),
     };
@@ -219,11 +248,17 @@ pub async fn content(
         && let (Some(chain_id), Some(message_id)) = (anchor.chain_id, anchor.message_id)
     {
         found = match crate::peers::pull(&state, store, chain_id, message_id, digest).await {
-            Ok(pulled) => pulled.stored().map(|b| b.to_vec()),
+            Ok(pulled) => pulled.stored().map(|bytes| {
+                if revalidated {
+                    StatusCode::NOT_MODIFIED.into_response()
+                } else {
+                    content_response(bytes)
+                }
+            }),
             Err(error) => return error.respond(),
         };
     }
-    let Some(bytes) = found else {
+    let Some(response) = found else {
         return json_said(
             StatusCode::NOT_FOUND,
             "content_not_found",
@@ -235,9 +270,6 @@ pub async fn content(
     if state.policy.taken_down(&digest.0) {
         return crate::host_policy::takedowns::refused().respond();
     }
-    // The hash names the bytes, so it is their ETag. A cache asking again
-    // gets 304 only for a record this host still serves.
-    let etag = format!("\"{}\"", digest.to_hex());
     let shared = [
         (header::ETAG, HeaderValue::from_str(&etag).expect("hex")),
         (
@@ -250,19 +282,10 @@ pub async fn content(
             HeaderValue::from_static("*"),
         ),
     ];
-    let revalidated = headers
-        .get_all(header::IF_NONE_MATCH)
-        .iter()
-        .filter_map(|v| v.to_str().ok())
-        .flat_map(|v| v.split(','))
-        .any(|tag| {
-            let tag = tag.trim();
-            tag == "*" || tag.trim_start_matches("W/") == etag
-        });
-    if revalidated {
-        return (StatusCode::NOT_MODIFIED, shared).into_response();
-    }
+    (shared, response).into_response()
+}
 
+fn content_response(bytes: bytes::Bytes) -> Response {
     // Serve the type the record declares. Records are untrusted bytes, so
     // whatever the type, the browser must neither sniff nor run them.
     let content_type = match envelope::parse(&bytes) {
@@ -271,8 +294,6 @@ pub async fn content(
         Err(_) => "application/octet-stream".to_string(),
     };
     (
-        StatusCode::OK,
-        shared,
         [
             (
                 header::CONTENT_TYPE,

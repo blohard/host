@@ -1538,13 +1538,19 @@ fn provider_failures_remain_retryable_and_recover() {
 fn polling_checks_the_saved_checkpoint_once_when_advancing_or_idle() {
     with_node("checkpoint-reads", |ctx| async move {
         let (running, state, index) = seeded_index(&ctx).await;
+        running
+            .node
+            .extra_logs
+            .lock()
+            .unwrap()
+            .push(log(13, 0, Hex([2; 20]), true, 1, 3));
         let before = running.node.count("eth_getBlockByNumber");
         running.node.set_head(25);
         assert!(index.poll(&state.verifier, 2000, &mut None).await.unwrap());
         assert_eq!(
             running.node.count("eth_getBlockByNumber") - before,
             3,
-            "an empty new range needs two boundary reads and one saved-checkpoint read"
+            "a trade at the boundary uses two boundary reads and one saved-checkpoint read"
         );
         assert_eq!(
             running.node.last("eth_getBlockByNumber")[0],

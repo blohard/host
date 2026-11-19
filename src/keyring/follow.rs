@@ -10,7 +10,7 @@ use super::{
 use crate::{
     abi::{quantity, text},
     block_logs::{Fetch, Unreadable, range_logs, receipt_logs},
-    chain::{Address, Checkpoint, Hash, Position},
+    chain::{Address, Hash, Header, Position},
     rpc,
     verifier::{Chain, ChainMismatch, Verifier},
 };
@@ -267,7 +267,7 @@ impl Keyring {
         let (logs, boundary) = self
             .read_range(client, chain, from, through, refused)
             .await?;
-        let through = boundary.block;
+        let through = boundary.checkpoint.block;
         let mut ordered = BTreeMap::new();
         let mut block_hashes = BTreeMap::new();
         for log in &logs {
@@ -294,7 +294,11 @@ impl Keyring {
         }
         let mut timestamps = BTreeMap::new();
         for (block, hash) in block_hashes {
-            let header = crate::chain::header(client, chain, block, rpc::Class::Ingestion).await?;
+            let header = if block == through {
+                &boundary
+            } else {
+                &crate::chain::header(client, chain, block, rpc::Class::Ingestion).await?
+            };
             ensure!(header.checkpoint.hash == hash, "trade on replaced block");
             timestamps.insert(block, header.timestamp);
         }
@@ -302,7 +306,7 @@ impl Keyring {
             crate::chain::header(client, chain, through, rpc::Class::Ingestion)
                 .await?
                 .checkpoint
-                == boundary,
+                == boundary.checkpoint,
             "range changed during fetch"
         );
         if let Some(checkpoint) = previous {
@@ -316,7 +320,7 @@ impl Keyring {
         }
         let range = Range {
             from,
-            through: boundary,
+            through: boundary.checkpoint,
             events: ordered
                 .into_iter()
                 .map(|((block, log), (event, transaction))| Logged {
@@ -350,13 +354,12 @@ impl Keyring {
         from: u64,
         mut through: u64,
         refused: &mut Option<(u64, u32)>,
-    ) -> Result<(Vec<Value>, Checkpoint)> {
+    ) -> Result<(Vec<Value>, Header)> {
         let addresses = [self.config.market];
         let topics = topics();
         loop {
-            let boundary = crate::chain::header(client, chain, through, rpc::Class::Ingestion)
-                .await?
-                .checkpoint;
+            let boundary =
+                crate::chain::header(client, chain, through, rpc::Class::Ingestion).await?;
             match range_logs(
                 client,
                 chain,
@@ -374,7 +377,7 @@ impl Keyring {
                 Err(Fetch::Transient(error)) if through == from => return Err(error),
                 Err(Fetch::Refused) if through == from => {
                     let logs = self
-                        .block_from_receipts(client, chain, from, boundary.hash, refused)
+                        .block_from_receipts(client, chain, from, boundary.checkpoint.hash, refused)
                         .await?;
                     return Ok((logs, boundary));
                 }

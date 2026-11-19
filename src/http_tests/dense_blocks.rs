@@ -31,6 +31,34 @@ fn receipt_calls(node: &mock_node::Running) -> usize {
 }
 
 #[test]
+fn a_missing_log_list_preserves_the_checkpoint_until_recovery() {
+    with_server(
+        "retry-log-list",
+        Some(dense_node()),
+        setup,
+        |server| async move {
+            let state = &server.state;
+            let node = &server.node.unwrap().node;
+            let mut follower = Follower::new(Limits::DEFAULT);
+            let before = checkpoint(state);
+            node.response_overrides
+                .lock()
+                .unwrap()
+                .insert("eth_getLogs".into(), json!({"result": null}));
+            follow::once_on(state, &mut follower).await;
+            assert_eq!(checkpoint(state), before);
+            assert_eq!(node.count("eth_getBlockReceipts"), 0);
+            node.response_overrides
+                .lock()
+                .unwrap()
+                .remove("eth_getLogs");
+            follow::once_on(state, &mut follower).await;
+            assert_eq!(committed(state), 5);
+        },
+    );
+}
+
+#[test]
 fn a_block_the_provider_will_not_answer_as_logs_is_read_from_its_receipts() {
     let node = dense_node();
     node.max_logs.store(2, Relaxed);

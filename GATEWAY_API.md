@@ -936,7 +936,9 @@ only in the exact wording Base's providers use, and treats any other error as th
 The host also counts a timeout waiting for ENS's gateway, after ten seconds, as that name's failure
 rather than ENS's: the gateway waits about 30 seconds on a name's own offchain server, so an owner
 could otherwise pause ENS at will. That address then has no ENS name for an hour, and a basename
-shown in its place is partial. Any other failure reaching the gateway still pauses ENS. Only a
+shown in its place is partial. The same one-hour rule applies when the Universal Resolver
+reports an offchain HTTP 408, 429 or 5xx through its callback. Any other failure reaching the
+gateway still pauses ENS. Only a
 failing upstream is paused, never this host running out of its own call budget.
 
 Up to 24 lookups run at once, which leaves some of the host's chain-call slots for receipts and
@@ -1425,7 +1427,10 @@ Addresses:
 ```
 
 Signatures from ordinary accounts (EOAs) are recovered locally; a contract admin is checked with
-ERC-1271 on `admin_chain`. The expiry must be between now and five minutes ahead, and is checked
+ERC-1271 on `admin_chain`. For policy edits, takedowns and bot declarations, a failed provider
+read during this check answers 502 `chain_read_unavailable`. Local capacity and provider
+throttles answer 503. A contract that refuses the signature answers 403.
+The expiry must be between now and five minutes ahead, and is checked
 again just before writing. The origin and the stored revision stop an edit from being replayed on
 another host or applied twice. A successful edit replaces the file atomically, advances its revision
 and returns the new public object. A reader disconnecting does not cancel the write.
@@ -1515,6 +1520,7 @@ Expires: <expires>
 ```
 
 Signatures are checked as for list edits, and the expiry must be between now and five minutes ahead.
+Only an authenticated admin can receive a takedown revision conflict.
 Both answer the list as `{"revision": "<decimal>", "hashes": ["0x…"]}`, with `no-store`. An edit is
 saved before it takes effect, and a reader disconnecting does not cancel it. The errors include 400
 `invalid_takedown_edit`, `invalid_takedown_read` or `invalid_signature`; 403 `not_host_admin`; 404

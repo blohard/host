@@ -270,7 +270,7 @@ impl Policy {
 
 impl Policy {
     /// One writer saves the takedown list, then publishes it, as for edits.
-    /// The handler checked the signature; the revision is checked again here.
+    /// The handler checks the signature. The writer checks the current revision.
     async fn write_takedowns(&self, edit: takedowns::Edit) -> Result<(), ApiError> {
         let config = self.0.config.as_ref().expect("configured takedowns");
         let path = takedowns::path(&config.file);

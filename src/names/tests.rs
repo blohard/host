@@ -677,6 +677,49 @@ async fn offchain_result_returns_to_the_fixed_resolver_for_verification() {
 }
 
 #[tokio::test]
+async fn offchain_http_errors_distinguish_a_temporary_failure_from_a_missing_record() {
+    let address = crate::chain::Hex([0x11; 20]);
+    for (status, partial) in [(503, true), (429, true), (408, true), (404, false)] {
+        let mock = Arc::new(Mock::default());
+        mock.answers.lock().unwrap().extend([
+            offchain(UNIVERSAL, vec![BATCH_GATEWAY.into()]),
+            err(HttpError {
+                status,
+                message: String::new(),
+            }
+            .abi_encode()),
+            modern_name("alice.base.eth"),
+            registry_entry(),
+            forward_record(address.0),
+            ok(textCall::abi_encode_returns(&String::new())),
+        ]);
+        let gateway = Arc::new(Mock::default());
+        gateway
+            .answers
+            .lock()
+            .unwrap()
+            .push_back(json!({"data":"0x040506"}));
+        let (url, rpc_task) = endpoint(mock).await;
+        let (gateway_url, gateway_task) = endpoint(gateway).await;
+        let names = Arc::new(gateway_service(url, gateway_url, true));
+        let entry = names.lookup(address).await.unwrap();
+        assert_eq!(entry.name.as_deref(), Some("alice.base.eth"));
+        assert_eq!(entry.partial, partial, "{status}");
+        assert_eq!(
+            lifetime(&entry),
+            if partial {
+                NEGATIVE_LIFETIME
+            } else {
+                SUCCESS_LIFETIME
+            }
+        );
+        assert!(names.paused.lock().unwrap().is_empty());
+        rpc_task.abort();
+        gateway_task.abort();
+    }
+}
+
+#[tokio::test]
 async fn offchain_sender_and_urls_cannot_choose_where_the_host_connects() {
     let mock = Arc::new(Mock::default());
     mock.answers.lock().unwrap().extend([

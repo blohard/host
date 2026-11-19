@@ -57,8 +57,14 @@ async fn simulation(
     let response = rpc::call(client, &chain.url, if estimate { "eth_estimateGas" } else { "eth_call" }, json!([
         {"from": author, "to": crate::abi::hex0x(&chain.contract), "data": crate::abi::hex0x(data), "gas": format!("0x{POST_GAS_LIMIT:x}")}, "latest"
     ])).await.map_err(ApiError::from)?;
-    if response.get("error").is_some() {
-        if let Some(revert) = rpc::error_data(&response["error"]).filter(|s| {
+    if let Some(error) = response.get("error") {
+        if estimate && exceeds_post_gas_limit(error) {
+            return Err(ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "post_exceeds_gas_limit",
+            ));
+        }
+        if let Some(revert) = rpc::error_data(error).filter(|s| {
             s.starts_with("0x") && s.len() <= 4098 && crate::abi::decode_hex(s).is_some()
         }) {
             return Err(
@@ -66,12 +72,21 @@ async fn simulation(
                     .with_revert(revert.to_owned()),
             );
         }
-        return Err(ApiError::unavailable(&response["error"]));
+        return Err(ApiError::unavailable(error));
     }
     response
         .get("result")
         .cloned()
         .ok_or_else(|| ApiError::unavailable("missing result"))
+}
+
+// Only an estimate explicitly refused at the gas ceiling we supplied.
+fn exceeds_post_gas_limit(error: &Value) -> bool {
+    let Some(message) = error["message"].as_str() else {
+        return false;
+    };
+    message == format!("out of gas: gas required exceeds: {POST_GAS_LIMIT}")
+        || message == format!("gas required exceeds allowance ({POST_GAS_LIMIT})")
 }
 
 #[derive(Deserialize)]

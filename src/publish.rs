@@ -305,13 +305,13 @@ async fn anchor_by_tx(
             format!("transaction 0x{} is not a post", hex::encode(tx_hash)),
         ));
     };
-    if tx.block_number.is_some()
-        && let Some(r) = state
+    if tx.block_number.is_some() {
+        let r = state
             .verifier
             .receipt(chain_id, tx_hash)
             .await
             .map_err(ApiError::from)?
-    {
+            .ok_or_else(|| ApiError::unavailable("mined transaction is missing its receipt"))?;
         if !r.succeeded {
             return Err(ApiError::said(
                 StatusCode::FORBIDDEN,
@@ -319,21 +319,26 @@ async fn anchor_by_tx(
                 format!("transaction 0x{} reverted", hex::encode(tx_hash)),
             ));
         }
-        if let Some(id) = r.message_id {
-            let mut anchor = anchor_by_message(state, chain_id, id).await?;
-            if anchor.body_digest != committed {
-                return Err(ApiError::unavailable(
-                    "receipt and post disagree; retry shortly",
-                ));
-            }
-            if !anchor.is_final() {
-                anchor.proof = AnchorProof::Transaction {
-                    hash: tx_hash,
-                    id: Some(id),
-                };
-            }
-            return Ok(anchor);
+        let id = r.message_id.ok_or_else(|| {
+            ApiError::said(
+                StatusCode::FORBIDDEN,
+                "not_a_post",
+                "the transaction posted no message on this board",
+            )
+        })?;
+        let mut anchor = anchor_by_message(state, chain_id, id).await?;
+        if anchor.body_digest != committed {
+            return Err(ApiError::unavailable(
+                "receipt and post disagree; retry shortly",
+            ));
         }
+        if !anchor.is_final() {
+            anchor.proof = AnchorProof::Transaction {
+                hash: tx_hash,
+                id: Some(id),
+            };
+        }
+        return Ok(anchor);
     }
     // Still pending, so the chain has not judged it yet. Whose post this is:
     // the sender for `post`; for `postBySig`, whose sender is only the relayer
@@ -350,6 +355,13 @@ async fn anchor_by_tx(
     {
         SignedAuthor::NotBySig => tx.from,
         SignedAuthor::Author(a) => a,
+        SignedAuthor::Expired => {
+            return Err(ApiError::said(
+                StatusCode::FORBIDDEN,
+                "signature_expired",
+                "the pending post's signature has expired",
+            ));
+        }
         SignedAuthor::Invalid => {
             return Err(ApiError::said(
                 StatusCode::FORBIDDEN,

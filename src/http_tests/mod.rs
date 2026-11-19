@@ -320,7 +320,7 @@ fn post_words(author: [u8; 20], hash: [u8; 32], nonce: u64) -> [[u8; 32]; 6] {
         [0u8; 32],
         [0u8; 32],
         word(&nonce.to_be_bytes()),
-        word(&1_800_000_000u64.to_be_bytes()),
+        [0xff; 32],
     ]
 }
 

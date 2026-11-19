@@ -193,6 +193,61 @@ fn http_relayed_pending_upload_is_the_authors() {
     );
 }
 
+#[test]
+fn signed_post_deadlines_apply_only_to_pending_uploads() {
+    let author = [0xaa; 20];
+    let body = record("text/plain", b"a post already included before its deadline");
+    let mut words = post_words(author, keccak::hash(&[&body]).0, 1);
+    // Later than block 11's timestamp on the fixture chain.
+    words[5] = alloy_primitives::U256::from(1_700_001_234u64).to_be_bytes();
+    let tx = MockTx {
+        hash: [3; 32],
+        from: [9; 20],
+        to: CONTRACT.into(),
+        input: post_by_sig_input(&words, &[0x99; 65]),
+        block: None,
+        message_id: Some(1),
+        reverted: false,
+    };
+    let node = Node {
+        head: 100.into(),
+        messages: 1.into(),
+        contracts: vec![author].into(),
+        txs: vec![tx].into(),
+        ..Node::new(31337, CONTRACT, body.clone())
+    };
+    with_server(
+        "signed-deadline",
+        Some(node),
+        |url| Setup {
+            gateway: false,
+            verifier: chain_verifier(url.unwrap(), ChainConfig::for_test(31337, "", CONTRACT)),
+            ..Setup::default()
+        },
+        move |server| async move {
+            let node = &server.node.unwrap().node;
+            let query = format!("chain_id=31337&tx_hash={}", hex0x(&[3; 32]));
+            let upload = || publish(&server.client, &server.base, &query, body.clone());
+            let pending = upload().await;
+            assert_eq!(pending.status(), 403);
+            assert_eq!(
+                pending.json::<Value>().await.unwrap()["code"],
+                "signature_expired"
+            );
+            assert_eq!(node.count("eth_call"), 0);
+            assert_eq!(server.state.store.as_ref().unwrap().holding.stats(), (0, 0));
+            node.txs.lock().unwrap()[0].block = Some(11);
+            node.response_overrides
+                .lock()
+                .unwrap()
+                .insert("eth_getTransactionReceipt".into(), json!({"result":null}));
+            assert_eq!(upload().await.status(), 502);
+            node.response_overrides.lock().unwrap().clear();
+            assert_eq!(upload().await.status(), 200);
+        },
+    );
+}
+
 /// Authenticating a contract account runs code the uploader chose, so the
 /// call carries the host's simulation ceiling like every call it forwards.
 #[test]

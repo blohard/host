@@ -525,6 +525,23 @@ pub fn result_bytes(resp: &Value) -> Result<Vec<u8>, RpcError> {
     decode_hex(result).ok_or_else(|| RpcError::BadResult("bad rpc result hex".into()))
 }
 
+/// Whether an ERC-1271 call approved the signature. The Board compares the
+/// first full ABI word, including its padding. A revert refuses the signature.
+pub fn signature_approved(resp: &Value) -> Result<bool, RpcError> {
+    if let Some(error) = resp.get("error") {
+        return if is_revert(error) {
+            Ok(false)
+        } else {
+            Err(RpcError::BadResult(format!(
+                "isValidSignature failed: {error}"
+            )))
+        };
+    }
+    let mut magic = [0; 32];
+    magic[..4].copy_from_slice(&crate::abi::selector("isValidSignature(bytes32,bytes)"));
+    Ok(result_bytes(resp)?.starts_with(&magic))
+}
+
 /// A structured RPC error that reports EVM rejection, rather than a provider outage.
 pub fn is_revert(error: &Value) -> bool {
     error.get("code").and_then(Value::as_i64) == Some(3)

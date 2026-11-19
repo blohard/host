@@ -9,7 +9,7 @@
 use crate::abi::{quantity, text};
 use crate::chain::{Address, Hash};
 use crate::{rpc, verifier::Chain};
-use anyhow::{Result, anyhow, bail, ensure};
+use anyhow::{Result, anyhow, ensure};
 use serde_json::{Value, json};
 
 /// Why a log query brought no logs.
@@ -60,10 +60,7 @@ pub async fn range_logs(
     if answer.get("error").is_some() {
         return Err(Fetch::Refused);
     }
-    match answer["result"].take() {
-        Value::Array(logs) => Ok(logs),
-        _ => Err(Fetch::Refused),
-    }
+    take_list(&mut answer, "result").map_err(Fetch::Transient)
 }
 
 /// Why a block's receipts brought no logs.
@@ -142,19 +139,25 @@ pub async fn receipt_logs(
         }
         return Err(Receipts::Failed(anyhow!("block receipts refused: {error}")));
     }
-    pick(answer["result"].take(), addresses, topics, block, hash).map_err(Receipts::Failed)
+    let receipts = take_list(&mut answer, "result").map_err(Receipts::Failed)?;
+    pick(receipts, addresses, topics, block, hash).map_err(Receipts::Failed)
+}
+
+fn take_list(object: &mut Value, field: &str) -> Result<Vec<Value>> {
+    object
+        .get_mut(field)
+        .and_then(Value::as_array_mut)
+        .map(std::mem::take)
+        .ok_or_else(|| anyhow!("RPC response has no {field} list"))
 }
 
 fn pick(
-    result: Value,
+    receipts: Vec<Value>,
     addresses: &[Address],
     topics: &[Hash],
     block: u64,
     hash: Hash,
 ) -> Result<Vec<Value>> {
-    let Value::Array(receipts) = result else {
-        bail!("block receipts returned no list");
-    };
     let mut logs = Vec::new();
     for mut receipt in receipts {
         ensure!(
@@ -168,10 +171,7 @@ fn pick(
         if quantity(&receipt["status"])? != 1 {
             continue;
         }
-        let Value::Array(entries) = receipt["logs"].take() else {
-            bail!("receipt without logs");
-        };
-        for log in entries {
+        for log in take_list(&mut receipt, "logs")? {
             let ours = log["address"]
                 .as_str()
                 .and_then(|a| a.parse::<Address>().ok())
@@ -237,4 +237,25 @@ pub fn refused_again(slot: &mut Option<(u64, u32)>, block: u64) -> anyhow::Error
     anyhow!(
         "block {block} refused as logs, poll {count} of {PERSISTENT_REFUSALS}, and the endpoint does not serve eth_getBlockReceipts"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rpc_lists_require_a_named_array() {
+        for mut value in [
+            Value::Null,
+            json!("waiting"),
+            json!([]),
+            json!({"result":false}),
+        ] {
+            assert!(take_list(&mut value, "result").is_err());
+        }
+        assert_eq!(
+            take_list(&mut json!({"result":[1,2]}), "result").unwrap(),
+            [json!(1), json!(2)]
+        );
+    }
 }

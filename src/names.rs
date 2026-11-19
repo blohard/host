@@ -34,6 +34,7 @@ sol! {
     function addr(bytes32 node) external view returns (address);
     function text(bytes32 node, string key) external view returns (string);
     error OffchainLookup(address sender, string[] urls, bytes callData, bytes4 callbackFunction, bytes extraData);
+    error HttpError(uint16 status, string message);
     error ResolverNotFound(bytes name);
     error ReverseAddressMismatch(string primary, bytes primaryAddress);
 }
@@ -347,6 +348,13 @@ impl Names {
                 || bytes.starts_with(&ReverseAddressMismatch::SELECTOR)
             {
                 return Ok(None);
+            }
+            // The batch gateway can report a name's offchain server failure
+            // through the Universal Resolver's callback.
+            if HttpError::abi_decode_validate(&bytes)
+                .is_ok_and(|error| matches!(error.status, 408 | 429 | 500..=599))
+            {
+                return Err(RecordFailed.into());
             }
             // Any other revert, or an offchain lookup this host will not
             // follow, leaves the address without a verifiable name.

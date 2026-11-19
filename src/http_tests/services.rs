@@ -85,6 +85,30 @@ fn transaction_services_build_bounded_calls_and_decode_receipts() {
                 "estimate the same gate the wallet will send"
             );
 
+            for (message, status) in [
+                ("out of gas: gas required exceeds: 500000", 422),
+                ("gas required exceeds allowance (500000)", 422),
+                ("gas required exceeds allowance (40000)", 502),
+                ("provider unavailable", 502),
+            ] {
+                *node.node.simulation_error.lock().unwrap() =
+                    Some(json!({"code":-32003, "message":message}));
+                let response = client
+                    .post(format!("{path}/post-estimate"))
+                    .json(&json!({"author":replier,"content_hash":hex0x(&[22;32]),"parent":"0"}))
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), status, "{message}");
+                if status == 422 {
+                    assert_eq!(
+                        response.json::<Value>().await.unwrap()["code"],
+                        "post_exceeds_gas_limit"
+                    );
+                }
+            }
+            *node.node.simulation_error.lock().unwrap() = None;
+
             let pending =
                 get_json(&client, &format!("{path}/transaction/{}", hex0x(&[99; 32]))).await;
             assert_eq!(pending["status"], "pending");

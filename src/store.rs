@@ -318,6 +318,22 @@ impl<E: Context + Spawner> ContentStore<E> {
     }
 }
 
+/// Commit each enabled store even if a previous write poisoned the other.
+pub async fn commit_stores<E: Context + Spawner>(
+    bodies: &ContentStore<E>,
+    attachments: Option<&ContentStore<E>>,
+) -> Result<()> {
+    let bodies = bodies.commit().await.context("committing bodies");
+    let Some(attachments) = attachments else {
+        return bodies;
+    };
+    let attachments = attachments.commit().await.context("committing attachments");
+    match (bodies, attachments) {
+        (Err(body), Err(attachment)) => Err(anyhow!("{body:#}, {attachment:#}")),
+        (body, attachment) => body.and(attachment),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -441,6 +457,31 @@ mod tests {
                     .await
                     .is_err()
             );
+        });
+    }
+
+    #[test]
+    fn a_failed_body_store_still_commits_attachments() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let attachment = b"an independent attachment".to_vec();
+            let digest = {
+                let bodies = ContentStore::init(ctx.child("b"), Kind::Bodies, MAX_CONTENT_SIZE)
+                    .await
+                    .unwrap();
+                let images =
+                    ContentStore::init(ctx.child("a"), Kind::Attachments, MAX_CONTENT_SIZE)
+                        .await
+                        .unwrap();
+                let (digest, _) = images.put(attachment.clone()).await.unwrap();
+                *bodies.inner.write().await = None;
+                assert!(commit_stores(&bodies, Some(&images)).await.is_err());
+                digest
+            };
+            let images =
+                ContentStore::init(ctx.child("reopen"), Kind::Attachments, MAX_CONTENT_SIZE)
+                    .await
+                    .unwrap();
+            assert_eq!(images.get(&digest).await.unwrap(), Some(attachment));
         });
     }
 

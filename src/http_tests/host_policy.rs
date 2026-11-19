@@ -229,6 +229,27 @@ fn contract_admin_requires_erc1271_approval() {
                 client.post(&url).json(&edit).send().await.unwrap().status(),
                 403
             );
+            for (answer, status) in [
+                (
+                    json!({"error":{"code":3,"message":"execution reverted"}}),
+                    403,
+                ),
+                (
+                    json!({"error":{"code":-32603,"message":"provider unavailable"}}),
+                    502,
+                ),
+                (json!({"result":null}), 502),
+            ] {
+                node.node
+                    .response_overrides
+                    .lock()
+                    .unwrap()
+                    .insert("eth_call".into(), answer);
+                assert_eq!(
+                    client.post(&url).json(&edit).send().await.unwrap().status(),
+                    status
+                );
+            }
             node.node.response_overrides.lock().unwrap().insert(
                 "eth_call".into(),
                 json!({"result":format!("0x1626ba7e{}", "00".repeat(28))}),

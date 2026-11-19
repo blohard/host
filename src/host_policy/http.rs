@@ -127,12 +127,7 @@ async fn signed_by(
         "to": signer, "data": crate::abi::hex0x(&crate::abi::is_valid_signature_calldata(digest, &signature)),
         "gas": format!("0x{:x}", crate::rpc::SIM_GAS_CAP)
     }, "latest"])).await.map_err(ApiError::from)?;
-    Ok(result.get("error").is_none()
-        && crate::rpc::result_bytes(&result).is_ok_and(|bytes| {
-            bytes.len() >= 32
-                && bytes[..4] == [0x16, 0x26, 0xba, 0x7e]
-                && bytes[4..32].iter().all(|b| *b == 0)
-        }))
+    crate::rpc::signature_approved(&result).map_err(ApiError::from)
 }
 
 /// The takedown list as only the admin sees it. Never cached.
@@ -158,9 +153,6 @@ pub async fn write_takedowns(
     };
     let checked = async {
         let config = configured(&state)?;
-        if edit.revision != state.policy.takedowns().revision {
-            return Err(ApiError::new(StatusCode::CONFLICT, "takedowns_changed"));
-        }
         let message = edit.message(&config.origin, now())?;
         admin_signed(&state, config, &message, &edit.signature).await?;
         state.policy.write_takedowns(edit).await

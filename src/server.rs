@@ -36,11 +36,11 @@ pub struct StoreState {
 impl StoreState {
     /// Make everything taken so far durable, both stores.
     pub async fn commit(&self) -> anyhow::Result<()> {
-        self.bodies.commit().await?;
-        if let Some((attachments, _)) = &self.attachments {
-            attachments.commit().await?;
-        }
-        Ok(())
+        crate::store::commit_stores(
+            &self.bodies,
+            self.attachments.as_ref().map(|(store, _)| store),
+        )
+        .await
     }
 }
 

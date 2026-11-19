@@ -135,14 +135,18 @@ fn the_admin_takes_content_down_privately_and_can_restore_it() {
                 .post(&edits)
                 .json(&edit(
                     &SigningKey::from_slice(&[8; 32]).unwrap(),
-                    0,
+                    99,
                     "add",
                     &hash,
                 ))
                 .send()
                 .await
                 .unwrap();
-            assert_eq!(refused.status(), 403, "only the admin");
+            assert_eq!(
+                refused.status(),
+                403,
+                "only the admin sees revision conflicts"
+            );
             let taken = client
                 .post(&edits)
                 .json(&edit(&key, 0, "add", &hash))

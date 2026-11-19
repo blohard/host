@@ -266,11 +266,11 @@ A body enters permanent storage only once its message reaches the configured acc
 is, enough confirmations. Until then the upload is held in memory, unserved, for at most 30 minutes.
 The holding area takes at most 64 MiB and 4,096 records in all, and 16 records and 12 MiB per signer
 on each chain, so one or two signers cannot fill it with uploads whose transactions never get mined.
-One open issue: a pending `postBySig` is charged to the author its signature names, and that
-signature is public calldata once the post is mined, so a stranger's transactions that carry an
-author's old signed posts, if a provider reports them as pending, count against that author until
-they expire. Whether a Base provider ever reports such a transaction as pending is unverified. A
-held transaction is tracked by hash until its receipt reaches the accepted depth. If the post
+For a pending `postBySig`, the host checks the signature and its deadline against the host clock
+before charging the author a holding slot. A mined post uses its receipt. Pending admission
+does not check the Board nonce, so a previously used signature still within its deadline can
+count against its author if a provider reports the transaction as pending.
+A held transaction is tracked by hash until its receipt reaches the accepted depth. If the post
 number changes before then, promotion follows the new receipt. A final receipt that reverted or
 posted no message drops the held body and its attachments. The watcher also drops a body if its
 numbered proof commits to different bytes, its post is withdrawn, its author is blocked, or its
@@ -394,6 +394,7 @@ come after the proof:
 | `400` | `malformed_request` | `tx_hash must be 32 bytes of hex` | malformed `tx_hash` |
 | `404` | `transaction_not_found` | `chain <C> has no transaction 0x…: send it first, then upload` | the chain's RPC does not know the transaction yet. Also what a lagging RPC returns for a transaction sent moments ago; see the retry guidance below. |
 | `403` | `not_board_transaction` / `not_a_post` / `transaction_reverted` | `transaction 0x… is not sent to the board` / `… is not a post` / `… reverted` | the transaction cannot anchor anything on this board |
+| `403` | `signature_expired` | `the pending post's signature has expired` | The signed deadline on a pending `postBySig` has passed. |
 | `403` | `signature_invalid` | `transaction 0x… names an author whose signature does not verify` | a pending `postBySig` whose signature the named author did not make (checked as the Board will check it: the signature recovers to the author, or the author has code and accepts it through ERC-1271). Refused before it can take a holding slot in that author's name. |
 | `403` | `not_anchored` | `not anchored on-chain: chain <C> has no message <M> (eth_call failed: …)` | the core contract reverted: no such message id at the block asked, which a lagging RPC also answers for a post mined moments ago; see the retry guidance below. A provider error is answered 502 instead, or 503 with `Retry-After` for a recognized rate throttle. |
 | `403` | `host_blocked` | `posting blocked by host` | the host's policy blocks the post's author ([host blocks](GATEWAY_API.md#host-blocks)). Held uploads by a blocked author are dropped too. |

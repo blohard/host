@@ -14,7 +14,7 @@ use crate::abi::{
     content_hash_from_return, get_message_calldata, post_by_sig_digest, post_by_sig_parts,
     reply_gate_calldata,
 };
-use crate::abi::{hex0x, parse_address, parse_quantity, selector};
+use crate::abi::{hex0x, parse_address, parse_quantity};
 use crate::config::Config;
 use crate::keccak;
 use crate::rpc::{self, Budget, RpcError, Upstream, result_bytes};
@@ -184,6 +184,8 @@ pub enum SignedAuthor {
     NotBySig,
     /// The named author's signature does not verify; the Board will refuse it.
     Invalid,
+    /// The signed deadline has already passed.
+    Expired,
     /// The named author stands behind the post.
     Author([u8; 20]),
 }
@@ -389,6 +391,13 @@ impl Verifier {
         let Some((words, sig)) = post_by_sig_parts(input) else {
             return Ok(SignedAuthor::NotBySig);
         };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| VerifyError::Rpc("host clock precedes Unix epoch".into()))?
+            .as_secs();
+        if alloy_primitives::U256::from_be_bytes(words[5]) < alloy_primitives::U256::from(now) {
+            return Ok(SignedAuthor::Expired);
+        }
         let author: [u8; 20] = words[0][12..].try_into().expect("20 bytes");
         let (client, chain) = self.chain(chain_id)?;
         let digest = post_by_sig_digest(chain_id, &chain.contract, &words);
@@ -429,20 +438,7 @@ impl Verifier {
             }, "latest"]),
         )
         .await?;
-        if let Some(error) = resp.get("error") {
-            return if rpc::is_revert(error) {
-                Ok(SignedAuthor::Invalid)
-            } else {
-                Err(VerifyError::Rpc(format!(
-                    "isValidSignature failed: {error}"
-                )))
-            };
-        }
-        let mut magic_word = [0u8; 32];
-        magic_word[..4].copy_from_slice(&selector("isValidSignature(bytes32,bytes)"));
-        let bytes = result_bytes(&resp)?;
-        let magic = bytes.len() >= 32 && bytes[..32] == magic_word;
-        Ok(if magic {
+        Ok(if rpc::signature_approved(&resp)? {
             SignedAuthor::Author(author)
         } else {
             SignedAuthor::Invalid
